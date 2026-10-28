@@ -213,3 +213,39 @@ def test_shift_keeps_frame_with_float_imprecise_time() -> None:
     # So the line is on frames 6141 to 6146 and has to stay in those frame windows.
     assert timedelta(milliseconds=256089) < line.start <= timedelta(milliseconds=256131), _line_yap(line)
     assert timedelta(milliseconds=256339) < line.end <= timedelta(milliseconds=256381), _line_yap(line)
+
+
+def test_shift_0() -> None:
+    """
+    shift_0 should snap the lines of the allowed styles to the frame grid and leave the others alone.
+    """
+    from fractions import Fraction
+
+    resolved = resolve_timesource_and_scale(Fraction(24000, 1001))
+    path = _write_sub(get_workdir() / "shift_0.ass", [(timedelta(seconds=1), timedelta(milliseconds=2990), "off grid")])
+    sub = SubFile(path)
+
+    sub.shift_0(resolved, allowed_styles=["Sign"])
+    line = cast(_Line, sub._read_doc().events[0])
+    assert (line.start, line.end) == (timedelta(seconds=1), timedelta(milliseconds=2990)), _line_yap(line)
+
+    sub.shift_0(resolved)
+    line = cast(_Line, sub._read_doc().events[0])
+    # Starts on frame 24 and ends on frame 71, both centered between their frame and the neighbouring one
+    assert (line.start, line.end) == (timedelta(milliseconds=980), timedelta(milliseconds=2980)), _line_yap(line)
+
+
+def test_shift_line_ending_before_first_frame() -> None:
+    """
+    A line that ends before the first frame of a video that doesn't start at 0 should become zero length instead of erroring.
+    """
+    from fractions import Fraction
+    from video_timestamps import FPSTimestamps, RoundingMethod
+
+    timestamps = FPSTimestamps(RoundingMethod.ROUND, Fraction(1000), Fraction(24000, 1001), first_timestamps=Fraction(42, 1000))
+    path = _write_sub(get_workdir() / "shift_first_frame.ass", [(timedelta(0), timedelta(milliseconds=30), "before first frame")])
+
+    sub = SubFile(path)
+    sub.shift(0, timestamps)
+    line = cast(_Line, sub._read_doc().events[0])
+    assert line.start == line.end, _line_yap(line)

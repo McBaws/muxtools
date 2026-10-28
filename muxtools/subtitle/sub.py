@@ -426,8 +426,9 @@ class SubFile(BaseSubFile):
         def _func(lines: LINES):
             for line in lines:
                 if not allowed_styles or line.style.casefold() in {style.casefold() for style in allowed_styles}:
-                    result = self._shift_line_by_frames(line, 0, resolved_ts, OutOfBoundsMode.ERROR)
-                    line = result.line
+                    shifted = self._shift_line_by_frames(line, 0, resolved_ts, OutOfBoundsMode.ERROR).line
+                    line.start = shifted.start
+                    line.end = shifted.end
 
         return self.manipulate_lines(_func)
 

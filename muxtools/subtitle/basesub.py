@@ -5,6 +5,7 @@ from typing import Any, NamedTuple
 from collections.abc import Callable, Sequence
 from enum import IntEnum, Enum
 from copy import deepcopy
+from fractions import Fraction
 
 from video_timestamps import ABCTimestamps, TimeType
 
@@ -256,7 +257,7 @@ class BaseSubFile(ABC, MuxingFile):
 
         # Whole milliseconds without going through a float, see timedelta_to_frame
         end_ms = line.end // timedelta(milliseconds=1)
-        zero_length = end_ms <= timestamps.first_timestamps
+        zero_length = Fraction(end_ms, 1000) <= timestamps.first_timestamps
         if zero_length:
             end_frame = start_frame
         else:
