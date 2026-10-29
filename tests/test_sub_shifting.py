@@ -247,3 +247,17 @@ def test_shift_line_ending_before_first_frame() -> None:
     sub.shift(0, timestamps)
     line = cast(_Line, sub._read_doc().events[0])
     assert line.start == line.end, _line_yap(line)
+
+
+def test_from_srt_timing(tmp_path: Path) -> None:
+    """
+    SRT times are snapped to frames and converted back the same way aegisub does it.
+    """
+    srt = tmp_path / "ep.srt"
+    srt.write_text("1\n00:00:00,375 --> 00:00:01,000\ntext\n\n", encoding="utf-8")
+    line = cast(_Line, SubFile.from_srt(srt)._read_doc().events[0])
+
+    # Frame n is shown at round(n * 1001 / 24) ms: 8 at 334, 9 at 375, 23 at 959 and 24 at 1001.
+    # The line is on frames 9 to 23. Aegisub puts the start halfway between frames 8 and 9: 334 + (375 - 334 + 1) // 2 = 355
+    # and the end halfway between frames 23 and 24: 959 + (1001 - 959 + 1) // 2 = 980. Both are then rounded to centiseconds.
+    assert (line.start, line.end) == (timedelta(milliseconds=360), timedelta(milliseconds=980)), _line_yap(line)

@@ -23,7 +23,7 @@ from ..utils.files import ensure_path_exists, make_output, clean_temp_files, uni
 from ..utils.probe import ParsedFile
 from ..muxing.muxfiles import MuxingFile
 from ..muxing.tracks import Attachment
-from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode
+from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode, _frame_to_aegisub_time
 
 __all__ = ["FontFile", "SubFile", "DEFAULT_DIALOGUE_STYLES"]
 
@@ -908,8 +908,7 @@ class SubFile(BaseSubFile):
             args = timestamp.split(",")[0].split(":")
             parsed = timedelta(hours=int(args[0]), minutes=int(args[1]), seconds=int(args[2]), milliseconds=int(timestamp.split(",")[1]))
             cope = timedelta_to_frame(resolved_ts, parsed, time_type)
-            cope = resolved_ts.frame_to_time(cope, time_type, 3, True)
-            return timedelta(milliseconds=cope)
+            return _frame_to_aegisub_time(resolved_ts, cope, time_type)
 
         def convert_tags(text: str) -> tuple[str, bool]:
             text = text.strip().replace("\n", "\\N")
