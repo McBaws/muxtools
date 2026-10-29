@@ -24,11 +24,11 @@ from ..utils.probe import ParsedFile
 from ..muxing.muxfiles import MuxingFile
 from ..muxing.tracks import Attachment
 from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode
+from .srt import parse_srt
 
 __all__ = ["FontFile", "SubFile", "DEFAULT_DIALOGUE_STYLES"]
 
 DEFAULT_DIALOGUE_STYLES = ["default", "main", "alt", "overlap", "flashback", "top", "italics"]
-SRT_REGEX = r"\d+[\r\n](?:(?P<start>\d+:\d+:\d+,\d+) --> (?P<end>\d+:\d+:\d+,\d+))[\r\n](?P<text>(?:.+\r?\n)+(?=(\r?\n)?))"
 LINES = list[_Line]
 
 CCC_REPLACEMENTS = dict(
@@ -876,6 +876,7 @@ class SubFile(BaseSubFile):
         timesource: TimeSourceT = Fraction(24000, 1001),
         timescale: TimeScaleT = TimeScale.MKV,
         encoding: str = "UTF8",
+        font_tags: bool = False,
     ) -> Self:
         """
         Convert srt subtitles to an ass SubFile.
@@ -889,31 +890,23 @@ class SubFile(BaseSubFile):
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
         :param encoding:        Encoding used to read the file. Defaults to UTF8.
+        :param font_tags:       Convert the color of <font> tags instead of only removing the tags.\n
+                                Off by default so every line keeps the look of its style.
         """
         caller = "SubFile.from_srt"
         file = ensure_path_exists(file, caller)
         resolved_ts = resolve_timesource_and_scale(timesource, timescale, caller=cls)
 
-        compiled = re.compile(SRT_REGEX, re.MULTILINE)
-
-        def srt_timedelta(timestamp: str, time_type: TimeType) -> timedelta:
-            args = timestamp.split(",")[0].split(":")
-            parsed = timedelta(hours=int(args[0]), minutes=int(args[1]), seconds=int(args[2]), milliseconds=int(timestamp.split(",")[1]))
-            cope = timedelta_to_frame(resolved_ts, parsed, time_type)
+        def srt_timedelta(ms: int, time_type: TimeType) -> timedelta:
+            cope = resolved_ts.time_to_frame(ms, time_type, 3)
             cope = resolved_ts.frame_to_time(cope, time_type, 3, True)
             return timedelta(milliseconds=cope)
 
-        def convert_tags(text: str) -> tuple[str, bool]:
-            text = text.strip().replace("\n", "\\N")
+        def detect_sign(text: str) -> tuple[str, bool]:
             is_sign = False
-            text = re.sub(r"[\<|{]i[\>|}]", R"{\\i1}", text)
-            text = re.sub(r"[\<|{]\/i[\>|}]", R"{\\i}", text)
-            text = re.sub(r"[\<|{]b[\>|}]", R"{\\b1}", text)
-            text = re.sub(r"[\<|{]\/b[\>|}]", R"{\\b}", text)
-            text = re.sub(r"[\<|{]u[\>|}]", R"{\\u1}", text)
-            text = re.sub(r"[\<|{]\/u[\>|}]", R"{\\u}", text)
-            stripped_text = re.sub(r"\{.*?\}", "", text)
-            if stripped_text.upper() == stripped_text and len(text) > 7:
+            # Only what is visible counts, and isupper is False for text without any cased letters, like Japanese or numbers
+            stripped_text = re.sub(r"\{.*?\}", "", text).replace("\\N", " ")
+            if stripped_text.isupper() and len(stripped_text) > 7:
                 if an8_all_caps and r"\an" not in text.casefold():
                     text = R"{\an8}" + text
                 is_sign = True
@@ -921,13 +914,11 @@ class SubFile(BaseSubFile):
 
         doc = create_document()
 
-        with open(file, "r", encoding=encoding) as reader:
-            content = reader.read() + "\n"
-            for match in compiled.finditer(content):
-                start = srt_timedelta(match["start"], TimeType.START)
-                end = srt_timedelta(match["end"], TimeType.END)
-                text, sign = convert_tags(match["text"])
-                doc.events.append(Dialogue(layer=99, start=start, end=end, text=text, style="Sign" if sign and style_all_caps else "Default"))
+        for event in parse_srt(file.read_text(encoding=encoding), font_tags):
+            start = srt_timedelta(event.start, TimeType.START)
+            end = srt_timedelta(event.end, TimeType.END)
+            text, sign = detect_sign(event.text)
+            doc.events.append(Dialogue(layer=99, start=start, end=end, text=text, style="Sign" if sign and style_all_caps else "Default"))
 
         out = make_output(file, "ass")
         with open(out, "w", encoding="utf_8_sig") as writer:
