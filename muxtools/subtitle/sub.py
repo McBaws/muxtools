@@ -7,6 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 from video_timestamps import TimeType
 import shutil
+import codecs
 import json
 import re
 import os
@@ -24,12 +25,13 @@ from ..utils.probe import ParsedFile
 from ..muxing.muxfiles import MuxingFile
 from ..muxing.tracks import Attachment
 from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode
+from .srt import parse_srt
 
 __all__ = ["FontFile", "SubFile", "DEFAULT_DIALOGUE_STYLES"]
 
 DEFAULT_DIALOGUE_STYLES = ["default", "main", "alt", "overlap", "flashback", "top", "italics"]
-SRT_REGEX = r"\d+[\r\n](?:(?P<start>\d+:\d+:\d+,\d+) --> (?P<end>\d+:\d+:\d+,\d+))[\r\n](?P<text>(?:.+\r?\n)+(?=(\r?\n)?))"
 LINES = list[_Line]
+
 
 CCC_REPLACEMENTS = dict(
     TopLeft=R"\an7", TopRight=R"\an9", CenterLeft=R"\an4", CenterCenter=R"\an5", CenterRight=R"\an6", BottomLeft=R"\an1", BottomRight=R"\an3"
@@ -885,6 +887,7 @@ class SubFile(BaseSubFile):
         timesource: TimeSourceT = Fraction(24000, 1001),
         timescale: TimeScaleT = TimeScale.MKV,
         encoding: str = "UTF8",
+        font_tags: bool = False,
     ) -> Self:
         """
         Convert srt subtitles to an ass SubFile.
@@ -897,30 +900,22 @@ class SubFile(BaseSubFile):
         :param timesource:      The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
-        :param encoding:        Encoding used to read the file. Defaults to UTF8.
+        :param encoding:        Encoding used to read the file. Defaults to UTF8.\n
+                                Files starting with a UTF-8 or UTF-16 byte order mark are always read with that.
+        :param font_tags:       Convert the color, face and size of <font> tags instead of removing them.\n
+                                Off by default so every line keeps the look of its style.
         """
         caller = "SubFile.from_srt"
         file = ensure_path_exists(file, caller)
         resolved_ts = resolve_timesource_and_scale(timesource, timescale, caller=cls)
 
-        compiled = re.compile(SRT_REGEX, re.MULTILINE)
-
-        def srt_timedelta(timestamp: str, time_type: TimeType) -> timedelta:
-            args = timestamp.split(",")[0].split(":")
-            parsed = timedelta(hours=int(args[0]), minutes=int(args[1]), seconds=int(args[2]), milliseconds=int(timestamp.split(",")[1]))
-            cope = resolved_ts.time_to_frame(int(parsed.total_seconds() * 1000), time_type, 3)
+        def srt_timedelta(ms: int, time_type: TimeType) -> timedelta:
+            cope = resolved_ts.time_to_frame(ms, time_type, 3)
             cope = resolved_ts.frame_to_time(cope, time_type, 3, True)
             return timedelta(milliseconds=cope)
 
-        def convert_tags(text: str) -> tuple[str, bool]:
-            text = text.strip().replace("\n", "\\N")
+        def detect_sign(text: str) -> tuple[str, bool]:
             is_sign = False
-            text = re.sub(r"[\<|{]i[\>|}]", R"{\\i1}", text)
-            text = re.sub(r"[\<|{]\/i[\>|}]", R"{\\i}", text)
-            text = re.sub(r"[\<|{]b[\>|}]", R"{\\b1}", text)
-            text = re.sub(r"[\<|{]\/b[\>|}]", R"{\\b}", text)
-            text = re.sub(r"[\<|{]u[\>|}]", R"{\\u1}", text)
-            text = re.sub(r"[\<|{]\/u[\>|}]", R"{\\u}", text)
             stripped_text = re.sub(r"\{.*?\}", "", text)
             if stripped_text.upper() == stripped_text and len(text) > 7:
                 if an8_all_caps and r"\an" not in text.casefold():
@@ -930,13 +925,18 @@ class SubFile(BaseSubFile):
 
         doc = create_document()
 
-        with open(file, "r", encoding=encoding) as reader:
-            content = reader.read() + "\n"
-            for match in compiled.finditer(content):
-                start = srt_timedelta(match["start"], TimeType.START)
-                end = srt_timedelta(match["end"], TimeType.END)
-                text, sign = convert_tags(match["text"])
-                doc.events.append(Dialogue(layer=99, start=start, end=end, text=text, style="Sign" if sign and style_all_caps else "Default"))
+        raw = file.read_bytes()
+        if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            encoding = "utf-16"
+        elif raw.startswith(codecs.BOM_UTF8):
+            encoding = "utf-8-sig"
+        content = raw.decode(encoding)
+
+        for event in parse_srt(content, doc.play_res_y, font_tags):
+            start = srt_timedelta(event.start, TimeType.START)
+            end = srt_timedelta(event.end, TimeType.END)
+            text, sign = detect_sign(event.text)
+            doc.events.append(Dialogue(layer=99, start=start, end=end, text=text, style="Sign" if sign and style_all_caps else "Default"))
 
         out = file.with_suffix(".ass")
         with open(out, "w", encoding="utf_8_sig") as writer:
