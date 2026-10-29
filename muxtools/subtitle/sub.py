@@ -104,6 +104,7 @@ class SubFile(BaseSubFile):
                         warn(f"Ignoring style '{style.name}' due to preexisting style of the same name.", self)
                         continue
                     main.styles.append(style)
+                    existing_styles.append(style.name)
 
             source = file[0]
             out = make_output(file[0], "ass", "merged")
@@ -462,7 +463,7 @@ class SubFile(BaseSubFile):
         :param oob_mode:        What to do with lines that are out of bounds after shifting.
         """
         resolved_ts = None
-        if sync is not None or sync2 is not None and shift_mode == ShiftMode.FRAME:
+        if (sync is not None or sync2 is not None) and shift_mode == ShiftMode.FRAME:
             resolved_ts = resolve_timesource_and_scale(timesource, timescale, fetch_from_setup=True, caller=self)
 
         file = ensure_path_exists(file, self)
@@ -473,7 +474,7 @@ class SubFile(BaseSubFile):
 
         events = []
         tomerge = []
-        existing_styles = [style.name for style in doc.styles]
+        existing_styles = [style.name.casefold() for style in doc.styles]
         target = None if not isinstance(sync, int) else sync
 
         # Find syncpoint in current document if sync is a string
@@ -500,6 +501,7 @@ class SubFile(BaseSubFile):
 
         # Find second syncpoint if any
         second_sync: int | timedelta | None = None
+        explicit_sync2 = sync2
         for line in mergedoc.events:
             if not isinstance(sync, str) and not sync2:
                 break
@@ -521,6 +523,8 @@ class SubFile(BaseSubFile):
 
         # Assume the first line to be the second syncpoint if none was found
         if second_sync is None and target is not None:
+            if explicit_sync2:
+                warn(f"Syncpoint '{explicit_sync2}' was not found in '{file.name}'. Using the first line instead.", self)
             for line in filter(lambda event: event.TYPE != "Comment", sorted_lines):
                 if shift_mode == ShiftMode.FRAME:
                     assert resolved_ts is not None
@@ -528,6 +532,13 @@ class SubFile(BaseSubFile):
                 else:
                     second_sync = line.start
                 break
+
+            if second_sync is None:
+                msg = f"No syncpoint or dialogue line to sync with was found in '{file.name}'."
+                if no_error:
+                    warn(msg, self)
+                    return self
+                raise error(msg, self)
 
         # Merge lines from file
         for line in sorted_lines if sort_lines else mergedoc.events:
@@ -559,9 +570,10 @@ class SubFile(BaseSubFile):
             events.extend(tomerge)
             doc.events = events
             for style in mergedoc.styles:
-                if style.name in existing_styles:
+                if style.name.casefold() in existing_styles:
                     continue
                 doc.styles.append(style)
+                existing_styles.append(style.name.casefold())
 
         self._update_doc(doc)
         return self
