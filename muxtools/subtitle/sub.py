@@ -462,6 +462,9 @@ class SubFile(BaseSubFile):
         :param shift_mode:      Choose what to shift by. Defaults to shifting by frames.
         :param oob_mode:        What to do with lines that are out of bounds after shifting.
         """
+        if isinstance(sync, int) and shift_mode == ShiftMode.TIME:
+            raise error("Syncing to a frame number only works with ShiftMode.FRAME.", self)
+
         resolved_ts = None
         if (sync is not None or sync2 is not None) and shift_mode == ShiftMode.FRAME:
             resolved_ts = resolve_timesource_and_scale(timesource, timescale, fetch_from_setup=True, caller=self)
