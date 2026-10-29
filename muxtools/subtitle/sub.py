@@ -411,9 +411,7 @@ class SubFile(BaseSubFile):
     ) -> Self:
         """
         Does the famous shift by 0 frames to fix frame timing issues.
-        (It's basically just converting time to frame and back)
-
-        This does not currently exactly reproduce the aegisub behaviour but it should have the same effect.
+        (It's basically just converting time to frame and back, the same way aegisub does)
 
         :param timesource:      The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n

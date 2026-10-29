@@ -66,8 +66,7 @@ def test_shift_by_24() -> None:
         presumed = cast(_Line, presumed)
         correct = cast(_Line, correct)
 
-        _compare_times(presumed.start, correct.start, resolved, TimeType.START)
-        _compare_times(presumed.end, correct.end, resolved, TimeType.END)
+        assert (presumed.start, presumed.end) == (correct.start, correct.end), _line_yap(presumed)
 
 
 def test_shift_by_7200() -> None:
@@ -90,8 +89,7 @@ def test_shift_by_7200() -> None:
         presumed = cast(_Line, presumed)
         correct = cast(_Line, correct)
 
-        _compare_times(presumed.start, correct.start, resolved, TimeType.START)
-        _compare_times(presumed.end, correct.end, resolved, TimeType.END)
+        assert (presumed.start, presumed.end) == (correct.start, correct.end), _line_yap(presumed)
 
 
 def test_shift_to_frame_zero() -> None:
