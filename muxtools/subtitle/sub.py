@@ -477,7 +477,7 @@ class SubFile(BaseSubFile):
 
         events = []
         tomerge = []
-        existing_styles = [style.name.casefold() for style in doc.styles]
+        existing_styles = [style.name for style in doc.styles]
         target = None if not isinstance(sync, int) else sync
 
         # Find syncpoint in current document if sync is a string
@@ -536,7 +536,8 @@ class SubFile(BaseSubFile):
                     second_sync = line.start
                 break
 
-            if second_sync is None:
+            # A file without any lines has nothing to merge, so it doesn't need anything to sync with
+            if second_sync is None and sorted_lines:
                 msg = f"No syncpoint or dialogue line to sync with was found in '{file.name}'."
                 if no_error:
                     warn(msg, self)
@@ -573,10 +574,10 @@ class SubFile(BaseSubFile):
             events.extend(tomerge)
             doc.events = events
             for style in mergedoc.styles:
-                if style.name.casefold() in existing_styles:
+                if style.name in existing_styles:
                     continue
                 doc.styles.append(style)
-                existing_styles.append(style.name.casefold())
+                existing_styles.append(style.name)
 
         self._update_doc(doc)
         return self
