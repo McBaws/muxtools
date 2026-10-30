@@ -183,6 +183,9 @@ def subset_fonts(
     # workdir is an orphaned duplicate and is removed
     output_files: set[Path] = set()
 
+    # Decide which faces get subset (and their hashed names) before writing anything,
+    # because the faces that don't still need the hashed names of the ones that do
+    face_characters: dict[ABCFontFace, set[str]] = {}
     for source_file, face_list in faces_by_file.items():
         file_size = os.path.getsize(source_file)
         font_names = {_get_fontname(face) for face in face_list}
@@ -196,13 +199,7 @@ def subset_fonts(
                 info(f"Skipping subsetting for '{source_file}' (not in target_fonts)", subset_fonts)
             elif file_size < min_file_size_to_subset:
                 info(f"Skipping subsetting for '{source_file}' ({sizeof_fmt(file_size)} < {sizeof_fmt(min_file_size_to_subset)})", subset_fonts)
-            total_old_size += file_size
-            total_new_size += file_size
-            output_files.add(source_file)
             continue
-
-        # (font_face, loaded TTFont, character count) for faces we will save
-        faces_to_save: list[tuple[ABCFontFace, ttLib.TTFont, int]] = []
 
         for font_face in face_list:
             font_name = _get_fontname(font_face)
@@ -221,11 +218,35 @@ def subset_fonts(
                     warn(f"No characters used in font '{font_name}'. Defaulting to common subset.", subset_fonts)
                     characters.update(COMMON_UNICODE_CHARS)
 
-            chars_sorted = "".join(sorted(characters))
-            for old_name in fonts[font_face]["names"]:
-                fonts[font_face]["names_hashed"][old_name] = _hash_font_name(old_name, chars_sorted)
+            face_characters[font_face] = characters
 
-            debug(f"Subsetting font '{source_file}' (index {font_face.font_index})...", subset_fonts)
+    # Faces sharing a name (e.g. Regular and Bold of a family) have to get the same hashed name or they stop being one family.
+    # This includes faces that aren't subset (e.g. a skipped Bold or one only used for drawings), which are only renamed.
+    name_characters: dict[str, set[str]] = defaultdict(set)
+    for font_face, characters in face_characters.items():
+        for name in fonts[font_face]["names"]:
+            name_characters[name].update(characters)
+
+    hashed_names = {name: _hash_font_name(name, "".join(sorted(characters))) for name, characters in name_characters.items()}
+    for data in fonts.values():
+        data["names_hashed"] = {name: hashed_names[name] for name in data["names"] if name in hashed_names}
+
+    for source_file, face_list in faces_by_file.items():
+        file_size = os.path.getsize(source_file)
+
+        if not any(fonts[font_face]["names_hashed"] for font_face in face_list):
+            # Nothing in this file is subset or renamed, so the original is kept
+            total_old_size += file_size
+            total_new_size += file_size
+            output_files.add(source_file)
+            continue
+
+        # (font_face, loaded TTFont, character count or None if it wasn't subset) for faces we will save
+        faces_to_save: list[tuple[ABCFontFace, ttLib.TTFont, int | None]] = []
+
+        for font_face in face_list:
+            characters = face_characters.get(font_face)
+            names_hashed = fonts[font_face]["names_hashed"]
 
             ttLib_font = ttLib.TTFont(source_file, fontNumber=font_face.font_index)
 
@@ -233,32 +254,29 @@ def subset_fonts(
             for record in name_table.names:
                 if record.nameID in [1, 4, 6]:  # Font Family name, Full name, PostScript name
                     old_name = record.toUnicode().strip()
-                    if old_name not in fonts[font_face]["names_hashed"]:
-                        fonts[font_face]["names_hashed"][old_name] = _hash_font_name(old_name, chars_sorted)
-                    record.string = fonts[font_face]["names_hashed"][old_name]
+                    if characters is not None and old_name not in names_hashed:
+                        names_hashed[old_name] = _hash_font_name(old_name, "".join(sorted(characters)))
+                    if old_name in names_hashed:
+                        record.string = names_hashed[old_name]
 
-            # Mark as a muxtools subset via name ID 3 (unique font identifier).
-            # This lets font databases identify and group/skip subset fonts.
-            name_table.setName(f"muxtools-subset;{font_name};{_hash_font_name(font_name, chars_sorted)}", 3, 3, 1, 0x0409)
+            if characters is not None:
+                font_name = _get_fontname(font_face)
+                debug(f"Subsetting font '{source_file}' (index {font_face.font_index})...", subset_fonts)
 
-            subsetter = Subsetter()
-            subsetter.populate(text="".join(characters))
-            subsetter.subset(ttLib_font)
+                # Mark as a muxtools subset via name ID 3 (unique font identifier).
+                # This lets font databases identify and group/skip subset fonts.
+                name_table.setName(f"muxtools-subset;{font_name};{_hash_font_name(font_name, ''.join(sorted(characters)))}", 3, 3, 1, 0x0409)
 
-            faces_to_save.append((font_face, ttLib_font, len(characters)))
+                subsetter = Subsetter()
+                subsetter.populate(text="".join(characters))
+                subsetter.subset(ttLib_font)
 
-            for old_name, new_name in fonts[font_face]["names_hashed"].items():
+            faces_to_save.append((font_face, ttLib_font, len(characters) if characters is not None else None))
+
+            for old_name, new_name in names_hashed.items():
                 font_replacements[old_name] = new_name
 
-        if not faces_to_save:
-            # All faces skipped (no usage), leave the original untouched
-            # (was collected but not found again? Unlikely) and keep it
-            debug(f"All faces in '{source_file}' skipped (no usage?). Leaving original file untouched.", subset_fonts)
-            output_files.add(source_file)
-            continue
-
-        old_size = os.path.getsize(source_file)
-        total_old_size += old_size
+        total_old_size += file_size
 
         new_font_path = source_file.with_stem(f"{source_file.stem}_subset")
 
@@ -289,7 +307,10 @@ def subset_fonts(
 
         for font_face, _, char_count in faces_to_save:
             font_name = _get_fontname(font_face)
-            info(f"Subsetted font '{font_name}' ({char_count} glyphs, {sizeof_fmt(old_size)} -> {sizeof_fmt(new_size)})", subset_fonts)
+            if char_count is None:
+                info(f"Kept font '{font_name}' without subsetting", subset_fonts)
+            else:
+                info(f"Subsetted font '{font_name}' ({char_count} glyphs, {sizeof_fmt(file_size)} -> {sizeof_fmt(new_size)})", subset_fonts)
 
     if font_replacements:
         for sub in subs:
