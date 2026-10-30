@@ -1,13 +1,14 @@
-from muxtools import SubFile, Setup, get_workdir, collect_fonts, LoggingException
+from muxtools import SubFile, Setup, get_workdir, collect_fonts, subset_fonts, LoggingException
 from muxtools.subtitle.subutils import create_document
 from ass import Dialogue, Style
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.ttCollection import TTCollection
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from shutil import rmtree
+from shutil import move, rmtree
 import logging
 from time import sleep
 import pytest
@@ -54,6 +55,16 @@ def _build_font(family: str, bold: bool = False, chars: str = "abcdefghijklmnopq
 
 def _make_font(path: Path, family: str, bold: bool = False) -> Path:
     _build_font(family, bold).save(path)
+    return path
+
+
+def _make_collection(path: Path, family: str) -> Path:
+    """
+    Builds a collection with a Regular and a Bold face of the family.
+    """
+    collection = TTCollection()
+    collection.fonts = [_build_font(family), _build_font(family, bold=True)]
+    collection.save(path)
     return path
 
 
@@ -141,3 +152,64 @@ def test_collect_fonts_checks_repeated_face(tmp_path: Path) -> None:
     Setup("Test", None, error_on_danger=True)
     with pytest.raises(LoggingException, match="missing the following glyphs"):
         sub.collect_fonts(use_system_fonts=False, search_current_dir=False, additional_fonts=[tmp_path])
+
+
+@pytest.mark.parametrize("ignore_fonts_with_no_usage", [True, False])
+def test_subset_round_trip(tmp_path: Path, ignore_fonts_with_no_usage: bool) -> None:
+    """
+    Subset fonts have to be found again exactly like the original ones.
+
+    The fonts are collected, subset and then collected again from only the subset files.
+    Both collections have to find every font without any warnings, like faux bold because a face is missing from its family.
+    """
+    source = tmp_path / "fonts"
+    source.mkdir()
+    # A family split over two files where each face uses different characters
+    _make_font(source / "regular.ttf", "MT Test")
+    _make_font(source / "bold.ttf", "MT Test", bold=True)
+    # A collection where the bold face is only used for a drawing, so it has no characters to subset
+    _make_collection(source / "pair.ttc", "MT Pair")
+    # A family where only the bold face is skipped, like a font under the minimum size would be
+    _make_font(source / "skip_regular.ttf", "MT Skip")
+    _make_font(source / "skip_bold.ttf", "MT Skip", bold=True)
+
+    sub = _write_sub(
+        tmp_path / "sub.ass",
+        [("Default", "MT Test"), ("Pair", "MT Pair"), ("Skip", "MT Skip")],
+        [
+            ("Default", "abc"),
+            ("Default", R"{\b1}xyz"),
+            ("Pair", "ghi"),
+            ("Pair", R"{\b1\p1}m 0 0 l 100 0 100 100 0 100{\p0}"),
+            ("Skip", "jkl"),
+            ("Skip", R"{\b1}mno"),
+        ],
+    )
+    Setup("Test", None, error_on_danger=True)
+
+    with _warnings() as warnings:
+        collected = collect_fonts(sub, use_system_fonts=False, search_current_dir=False, additional_fonts=source)
+    assert not warnings
+    assert len(collected) == 5
+
+    # Aggressive so every face only keeps the characters it uses, which makes the drawing-only face fall back
+    # to the common subset when it isn't skipped for having no usage
+    subset = subset_fonts(
+        [sub],
+        aggressive=True,
+        ignore_fonts_with_no_usage=ignore_fonts_with_no_usage,
+        min_file_size_to_subset=0,
+        skip_fonts=["MTSkip-Bold"],
+        print_final_stats=False,
+    )
+    assert len(subset) == 5
+
+    subset_dir = tmp_path / "subset"
+    subset_dir.mkdir()
+    for font in subset:
+        move(font.file, subset_dir)
+
+    with _warnings() as warnings:
+        collected = collect_fonts(sub, use_system_fonts=False, search_current_dir=False, additional_fonts=subset_dir)
+    assert not warnings
+    assert len(collected) == 5
