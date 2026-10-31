@@ -401,3 +401,44 @@ def test_subset_checks_renamed_subs(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(font_module, "_replace_font_tags", lambda text, replacements: text)
     with pytest.raises(LoggingException, match="Subsetting changed which fonts are used"):
         _subset([sub], source)
+
+
+def test_subset_vsfilter_truncated_names(tmp_path: Path) -> None:
+    """
+    Fonts that VSFilter can't tell apart, as their names only differ after 31 characters, are renamed even when they aren't subset.
+    """
+    source = tmp_path / "fonts"
+    source.mkdir()
+    # Both names start with the same 31 characters, 'MT A Very Long Font Family Name'
+    _make_font(source / "regular.ttf", "MT A Very Long Font Family Name Regular")
+    _make_font(source / "bold.ttf", "MT A Very Long Font Family Name Bold", bold=True)
+    sub = _write_sub(
+        tmp_path / "sub.ass",
+        [("Default", "MT A Very Long Font Family Name Regular")],
+        [("Default", R"{\b1}abc"), ("Default", R"{\fnMT A Very Long Font Family Name Bold}def")],
+    )
+
+    with _warnings() as warnings:
+        subset = _subset([sub], source, target_fonts=[])
+
+    assert len([warning for warning in warnings if "VSFilter" in warning]) == 2
+    regular, bold = (font["name"].getDebugName(1) or "" for font in _by_weight(subset))
+    assert regular[:31] != bold[:31]
+    assert sub._read_doc().styles[0].fontname == regular
+
+
+def test_subset_checks_vsfilter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    It errors when the new names would only work in libass.
+    """
+    source = tmp_path / "fonts"
+    source.mkdir()
+    _make_font(source / "regular.ttf", "MT Test")
+    _make_font(source / "bold.ttf", "MT Test", bold=True)
+    sub = _write_sub(tmp_path / "sub.ass", [("Default", "MT Test")], [("Default", "abc"), ("Default", R"{\fnMT Test Bold}def")])
+
+    # Simulate a bug where all new names start with the same 31 characters
+    subset_name = font_module._subset_name
+    monkeypatch.setattr(font_module, "_subset_name", lambda name, key: "MT Subset Name That Is Too Long " + subset_name(name, key))
+    with pytest.raises(LoggingException, match=r"Subsetting changed which fonts are used for .*\(VSFilter\)"):
+        _subset([sub], source)
