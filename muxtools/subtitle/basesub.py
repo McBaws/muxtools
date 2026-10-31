@@ -155,8 +155,8 @@ class BaseSubFile(ABC, MuxingFile):
     ) -> SubTrack:
         return SubTrack(self.file, name, lang, default, forced, self.container_delay, args, tags or self.tags, **kwargs)
 
-    def _read_doc(self, file: PathLike | None = None) -> Document:
-        with open(self.file if not file else file, "r", encoding=self.encoding) as reader:
+    def _read_doc(self, file: PathLike | None = None, encoding: str | None = None) -> Document:
+        with open(self.file if not file else file, "r", encoding=encoding or self.encoding) as reader:
             doc = parseDoc(reader)
             self.__fix_style_definition(doc)
             return doc

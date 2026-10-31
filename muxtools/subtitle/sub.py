@@ -7,6 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 from video_timestamps import TimeType
 import shutil
+import codecs
 import json
 import re
 import os
@@ -54,6 +55,25 @@ def name_matches_style(style: str, style_names: list[str], exact_match: bool) ->
         return bool(next((style_name for style_name in style_names if style_name in style.casefold()), None))
 
 
+def _detect_encoding(file: Path, caller: Any = None) -> str:
+    raw = file.read_bytes()
+    # UTF-32 LE's BOM starts with UTF-16 LE's, so it has to be checked first
+    for bom, encoding in (
+        (codecs.BOM_UTF32_LE, "utf_32"),
+        (codecs.BOM_UTF32_BE, "utf_32"),
+        (codecs.BOM_UTF16_LE, "utf_16"),
+        (codecs.BOM_UTF16_BE, "utf_16"),
+    ):
+        if raw.startswith(bom):
+            return encoding
+    # Legacy 8-bit encodings are practically never valid UTF-8, and utf_8_sig reads it with or without a BOM
+    try:
+        raw.decode("utf_8_sig")
+        return "utf_8_sig"
+    except UnicodeDecodeError:
+        raise error(f"Couldn't detect the encoding of '{file.name}' as it isn't UTF-8. Please pass the encoding.", caller)
+
+
 class FontFile(MuxingFile):
     def to_track(self, *args) -> Attachment:
         return Attachment(self.file)
@@ -69,7 +89,8 @@ class SubFile(BaseSubFile):
     :param container_delay: Set a container delay used in the muxing process later.
     :param source:          The original file this sub came from, like the mkv it was extracted from.
                             Defaults to `file`, or the first file if several are merged.
-    :param encoding:        Encoding used for reading and writing the subtitle files.
+    :param encoding:        Encoding of the input file(s), which get converted to UTF-8.
+                            If None, UTF-8 is detected automatically, as is UTF-16/32 with a BOM.
     """
 
     def __init__(
@@ -78,7 +99,7 @@ class SubFile(BaseSubFile):
         container_delay: int = 0,
         source: PathLike | None = None,
         tags: dict[str, str] | None = None,
-        encoding: str = "utf_8_sig",
+        encoding: str | None = None,
     ):
         if isinstance(file, GlobSearch):
             file = file.paths
@@ -88,7 +109,7 @@ class SubFile(BaseSubFile):
             docs: list[Document] = []
             for i, f in enumerate(file):
                 f = ensure_path_exists(f, self)
-                with open(f, "r", encoding=self.encoding) as read:
+                with open(f, "r", encoding=encoding or _detect_encoding(f, self)) as read:
                     doc = parseDoc(read)
                     docs.append(doc)
                     if i != 0:
@@ -116,13 +137,14 @@ class SubFile(BaseSubFile):
         else:
             file = ensure_path_exists(file, self)
             source = source or file
-            if not os.path.samefile(file.parent, get_workdir()):
+            file_encoding = encoding or _detect_encoding(file, self)
+            if not os.path.samefile(file.parent, get_workdir()) or file_encoding != self.encoding:
                 out = make_output(file, "ass", "vof")
                 with open(out, "w", encoding=self.encoding) as writer:
-                    self._read_doc(file).dump_file(writer)
+                    self._read_doc(file, file_encoding).dump_file(writer)
                 file = out
 
-        super().__init__(file, container_delay, source, tags, encoding)
+        super().__init__(file, container_delay, source, tags)
 
     def manipulate_lines(self, func: Callable[[LINES], LINES | None]) -> Self:
         """
@@ -467,7 +489,7 @@ class SubFile(BaseSubFile):
             resolved_ts = resolve_timesource_and_scale(timesource, timescale, fetch_from_setup=True, caller=self)
 
         file = ensure_path_exists(file, self)
-        mergedoc = self._read_doc(file)
+        mergedoc = self._read_doc(file, _detect_encoding(file, self))
         doc = self._read_doc()
         doc_name = ensure_path_exists(self.file, self).name if str(self.source).lower().endswith(".mkv") else ensure_path(self.source, self).name
         self._warn_mismatched_properties(doc, mergedoc, doc_name, file.name)
@@ -873,9 +895,7 @@ class SubFile(BaseSubFile):
         with open(new_path, "w", encoding=self.encoding) as writer:
             doc.dump_file(writer)
 
-        new = self.__class__(new_path, self.container_delay, self.source, self.tags.copy() if self.tags else None)
-        new.encoding = self.encoding
-        return new
+        return self.__class__(new_path, self.container_delay, self.source, self.tags.copy() if self.tags else None)
 
     @classmethod
     def from_srt(
