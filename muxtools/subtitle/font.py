@@ -161,7 +161,10 @@ def subset_fonts(
     The default behavior is to include the used glyphs and a common set of unicode characters to ensure re-usability of the font for others editing your subtitles.
 
     Subset fonts get new names that are unique to their glyphs, so they never get mixed up with the full fonts, and the subs are updated to use them.
-    Afterwards, every line is checked to still use the same font as before.
+    Afterwards, every line is checked to still use the same font as before, both in libass and VSFilter.
+
+    VSFilter only compares the first 31 characters of font names, so it can pick a different font than libass when two names start the same.
+    These fonts are renamed even when they aren't subset, so both use the font libass picked.
 
     :param subs:                        List of subtitle files to analyze for used glyphs.
     :param aggressive:                  If enabled, this will only include the characters used in the subtitles and all `additional_glyphs` specified.
@@ -189,9 +192,10 @@ def subset_fonts(
     from fontTools.subset import Subsetter  # type: ignore[import-untyped]
     from fontTools import ttLib  # type: ignore[import-untyped]
     from fontTools.ttLib.ttCollection import TTCollection  # type: ignore[import-untyped]
-    from font_collector import AssDocument, FontLoader, FontCollection, FontSelectionStrategyLibass
+    from font_collector import AssDocument, FontLoader, FontCollection, FontSelectionStrategyLibass, FontSelectionStrategyVSFilter
 
     strategy = FontSelectionStrategyLibass()
+    vsfilter_strategy = FontSelectionStrategyVSFilter()
     font_collection = FontCollection(
         use_system_font=False,
         reload_system_font=False,
@@ -199,9 +203,11 @@ def subset_fonts(
         additional_fonts=FontLoader.load_additional_fonts([get_workdir()], scan_subdirs=False),
     )
 
-    # Every font a sub uses with the face it renders with. The renaming and the check afterwards work off of these.
+    # Every font a sub uses with the face it renders with in libass. The renaming and the check afterwards work off of these.
     usages: list[tuple[SubFile, AssStyle, FontResult | None]] = []
     characters: dict[ABCFontFace, set[str]] = defaultdict(set)
+    # Faces VSFilter doesn't pick for a name that libass does. They're renamed in any case, so VSFilter can tell them apart.
+    ambiguous_faces: set[ABCFontFace] = set()
 
     for sub in subs:
         for style, usage_data in AssDocument(sub._read_doc()).get_used_style(collect_draw_fonts=True).items():
@@ -210,8 +216,19 @@ def subset_fonts(
 
             if not result:
                 danger(f"Font '{style.fontname}' was not found! Did you run collect_fonts?", subset_fonts)
-            else:
-                characters[result.font_face].update(usage_data.characters_used)
+                continue
+            characters[result.font_face].update(usage_data.characters_used)
+
+            vsfilter_result = font_collection.get_used_font_by_style(style, vsfilter_strategy)
+            if vsfilter_result is None or vsfilter_result.font_face != result.font_face:
+                if result.font_face not in ambiguous_faces:
+                    warn(
+                        f"Font '{style.fontname}' renders as '{_get_fontname(result.font_face)}' in libass "
+                        f"but as '{_get_fontname(vsfilter_result.font_face) if vsfilter_result else None}' in VSFilter, "
+                        "which only compares the first 31 characters of font names. It will be renamed so both use the former.",
+                        subset_fonts,
+                    )
+                ambiguous_faces.add(result.font_face)
 
     faces_by_file: dict[Path, list[ABCFontFace]] = defaultdict(list)
     for font_face in characters:
@@ -271,7 +288,7 @@ def subset_fonts(
     new_exact_names: dict[ABCFontFace, str] = {}
 
     for family in _group_families(list(subset_characters)):
-        if all(subset_characters[font_face] is None for font_face in family):
+        if all(subset_characters[font_face] is None and font_face not in ambiguous_faces for font_face in family):
             continue
 
         key = "".join(
@@ -431,11 +448,11 @@ def _check_subset_usages(
     output_faces: dict[tuple[Path, int], ABCFontFace],
 ) -> None:
     """
-    Makes sure every font a sub uses still renders with the same face, now using only the output fonts.
+    Makes sure every font a sub uses still renders with the same face in libass, now using only the output fonts, and with that face in VSFilter too.
     """
-    from font_collector import AssDocument, AssStyle, FontLoader, FontCollection, FontSelectionStrategyLibass
+    from font_collector import AssDocument, AssStyle, FontLoader, FontCollection, FontSelectionStrategyLibass, FontSelectionStrategyVSFilter
 
-    strategy = FontSelectionStrategyLibass()
+    strategies = {"libass": FontSelectionStrategyLibass(), "VSFilter": FontSelectionStrategyVSFilter()}
     font_collection = FontCollection(
         use_system_font=False,
         reload_system_font=False,
@@ -460,18 +477,19 @@ def _check_subset_usages(
             if result is None:
                 continue
 
-            new_result = font_collection.get_used_font_by_style(style, strategy)
-            source_face = None
-            if new_result is not None and new_result.font_face.font_file is not None:
-                source_face = output_faces.get((Path(new_result.font_face.font_file.filename).resolve(), new_result.font_face.font_index))
+            for renderer, strategy in strategies.items():
+                new_result = font_collection.get_used_font_by_style(style, strategy)
+                source_face = None
+                if new_result is not None and new_result.font_face.font_file is not None:
+                    source_face = output_faces.get((Path(new_result.font_face.font_file.filename).resolve(), new_result.font_face.font_index))
 
-            if (
-                new_result is None
-                or source_face != result.font_face
-                or (new_result.mismatch_bold, new_result.need_faux_bold, new_result.mismatch_italic)
-                != (result.mismatch_bold, result.need_faux_bold, result.mismatch_italic)
-            ):
-                problems.append(f"'{style.fontname}' in '{sub.file.name}'")
+                if (
+                    new_result is None
+                    or source_face != result.font_face
+                    or (new_result.mismatch_bold, new_result.need_faux_bold, new_result.mismatch_italic)
+                    != (result.mismatch_bold, result.need_faux_bold, result.mismatch_italic)
+                ):
+                    problems.append(f"'{style.fontname}' in '{sub.file.name}' ({renderer})")
 
     if problems:
         raise error(f"Subsetting changed which fonts are used for {', '.join(problems)}! Please report this.", subset_fonts)
