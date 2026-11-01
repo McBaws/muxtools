@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from shlex import split as splitcommand
 from typing import Any
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,7 +26,13 @@ class Preprocessor(ABC):
     def get_args(self, caller: Any = None) -> Sequence[str]:
         return []
 
-    def analyze(self, file: AudioFile):
+    def analyze(self, file: AudioFile, preceding_filters: Sequence[str] = ()):
+        """
+        Called before the args and filter are requested, for preprocessors that have to look at the audio first.
+
+        :param file:                The file that will be processed
+        :param preceding_filters:   Filters of the preprocessors that run before this one
+        """
         return None
 
     @abstractmethod
@@ -68,21 +75,16 @@ class Resample(Preprocessor):
                 ),
                 caller,
             )
-        return (
-            []
-            if not self.depth
-            else ["-sample_fmt", f"s{self.depth}"]
-            + [
-                "-ar",
-                str(self.sample_rate),
-                "-resampler",
-                "soxr",
-                "-precision",
-                "24",
-                "-dither_method",
-                self.dither.name.lower(),
-            ]
-        )
+        return ([] if not self.depth else ["-sample_fmt", f"s{self.depth}"]) + [
+            "-ar",
+            str(self.sample_rate),
+            "-resampler",
+            "soxr",
+            "-precision",
+            "24",
+            "-dither_method",
+            self.dither.name.lower(),
+        ]
 
 
 class classproperty(object):
@@ -149,6 +151,7 @@ class Loudnorm(Preprocessor):
     It's strongly recommended to also put a `Resample` preprocessor into the chain as this filter needs to upsample to 192kHz and we don't want to encode that after.
 
     This will do a dynamic pass first to measure various values and then do the proper pass so it might take a while.
+    The measuring pass includes the filters of any preprocessors that come before this one.
 
     :param i:           The integrated loudness target. Range is `-70.0` - `-5.0`. Default value is `-24.0`.
     :param lra:         The loudness range target. Range is `1.0` - `50.0`. Default value is `7.0`.
@@ -173,7 +176,7 @@ class Loudnorm(Preprocessor):
     def can_run(self, track: TrackInfo, preprocessors: Sequence[Any]) -> bool:
         return True
 
-    def analyze(self, file: AudioFile):
+    def analyze(self, file: AudioFile, preceding_filters: Sequence[str] = ()):
         debug("Analyzing file loudness...", self)
         ffmpeg = get_executable("ffmpeg")
         out_var = "NUL" if os.name == "nt" else "/dev/null"
@@ -186,7 +189,7 @@ class Loudnorm(Preprocessor):
             "-map",
             "0:a:0",
             "-filter:a",
-            "loudnorm=print_format=json",
+            ",".join([*preceding_filters, "loudnorm=print_format=json"]),
             "-f",
             "null",
             out_var,
@@ -217,7 +220,7 @@ class Loudnorm(Preprocessor):
             # Ideally shouldn't run into this lmfao
             return ""
         return (
-            f"loudnorm=linear=true:i={self.i}:lra={self.lra}:tp={self.tp}:offset={self.offset if self.offset else self.measurements.target_offset}"
+            f"loudnorm=linear=true:i={self.i}:lra={self.lra}:tp={self.tp}:offset={self.offset if self.offset is not None else self.measurements.target_offset}"
             f":measured_I={self.measurements.i}:measured_tp={self.measurements.tp}:measured_LRA={self.measurements.lra}:measured_thresh={self.measurements.thresh}"
         )
 
@@ -230,6 +233,7 @@ class CustomPreprocessor(Preprocessor):
     :param filt:        Audio filter to append to the filterchain. Don't include any flags or whatever.
                         It should look like this `afade=t=in:ss=0:d=15`
     :param args:        Other args you may want to pass to ffmpeg.
+                        A string will be split like a shell would, e.g. `"-ac 1"` becomes `["-ac", "1"]`.
     """
 
     filt: str | None = None
@@ -242,6 +246,6 @@ class CustomPreprocessor(Preprocessor):
         return self.filt
 
     def get_args(self, caller: Any = None) -> Sequence[str]:
-        if isinstance(self.args, str) and not isinstance(self.args, Sequence):
-            self.args = [self.args]
+        if isinstance(self.args, str):
+            return splitcommand(self.args)
         return list(self.args) if self.args else []

@@ -1,9 +1,11 @@
 from muxtools import ensure_path, Setup, get_workdir, do_audio, get_executable, Opus, Sox, FFMpeg, VideoMeta, FLAC, AudioFile
+from muxtools import FF_FLAC, CustomPreprocessor, Downmix, Loudnorm, Resample
 from muxtools.utils.env import communicate_stdout
 from time import sleep
 from shutil import rmtree
 import pytest
 import logging
+import re
 
 test_dir = ensure_path(__file__, None).parent.parent
 sample_file_aac = test_dir / "test-data" / "audio" / "aac_source.m4a"
@@ -125,3 +127,45 @@ def test_opus_no_extractor(caplog):
     Opus().encode_audio(sample_file_thd_fake24)
     assert len([record for record in caplog.get_records("call") if "Encoding 'thd_source_fake24' to Opus (320 kbps)" in record.message]) == 1
     assert len([record for record in caplog.get_records("call") if "Piping audio" in record.message]) == 1
+
+
+def test_custom_preprocessor_string_args():
+    assert CustomPreprocessor(args="-ac 1").get_args() == ["-ac", "1"]
+
+    out = FF_FLAC(preprocess=CustomPreprocessor(args="-ac 1")).encode_audio(sample_file_flac)
+    assert out.get_trackinfo().raw_ffprobe.channels == 1
+
+
+def test_resample_only_sample_rate():
+    out = FF_FLAC(preprocess=Resample(depth=None, sample_rate=44100)).encode_audio(sample_file_flac)
+
+    track = out.get_trackinfo()
+    assert track.raw_ffprobe.sample_rate == 44100
+    assert track.bit_depth == 24
+
+
+def test_loudnorm_zero_offset():
+    loudnorm = Loudnorm(offset=0.0)
+    loudnorm.measurements = Loudnorm.Measurements(-20.0, 5.0, -1.0, -30.0, 1.5)
+
+    assert ":offset=0.0:" in (loudnorm.get_filter() or "")
+
+
+def _integrated_loudness(file) -> float:
+    ffmpeg = get_executable("ffmpeg")
+    _, out = communicate_stdout([ffmpeg, "-hide_banner", "-nostats", "-i", str(file), "-map", "0:a:0", "-af", "ebur128", "-f", "null", "-"])
+    return float(re.findall(r"I:\s+(-?\d+\.\d+) LUFS", out)[-1])
+
+
+def test_loudnorm_measures_after_downmix():
+    # Most of the energy is in the center channel so the downmix changes the loudness a lot
+    ffmpeg = get_executable("ffmpeg")
+    surround = get_workdir() / "surround.flac"
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.3:d=20:r=48000"]
+    args.extend(["-af", "pan=5.1|FL=0.1*c0|FR=0.1*c0|FC=c0|LFE=0*c0|BL=0.05*c0|BR=0.05*c0", "-c:a", "flac", str(surround)])
+    assert communicate_stdout(args)[0] == 0
+
+    out = FF_FLAC(preprocess=[Downmix(), Loudnorm(), Resample()]).encode_audio(surround)
+
+    assert out.get_trackinfo().raw_ffprobe.channels == 2
+    assert _integrated_loudness(out.file) == pytest.approx(-24, abs=0.5)
