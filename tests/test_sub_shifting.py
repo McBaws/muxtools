@@ -233,15 +233,23 @@ def test_shift_0() -> None:
     assert (line.start, line.end) == (timedelta(milliseconds=980), timedelta(milliseconds=2980)), _line_yap(line)
 
 
-def test_shift_line_ending_before_first_frame() -> None:
+@pytest.mark.parametrize(
+    "first_timestamps, end_ms",
+    [
+        ("42/1000", 30),
+        # 49.5ms gets rounded to 50ms by the time scale, so a line ending at 50ms ends exactly on the first frame
+        ("99/2000", 50),
+    ],
+)
+def test_shift_line_ending_before_first_frame(first_timestamps: str, end_ms: int) -> None:
     """
     A line that ends before the first frame of a video that doesn't start at 0 should become zero length instead of erroring.
     """
     from fractions import Fraction
     from video_timestamps import FPSTimestamps, RoundingMethod
 
-    timestamps = FPSTimestamps(RoundingMethod.ROUND, Fraction(1000), Fraction(24000, 1001), first_timestamps=Fraction(42, 1000))
-    path = _write_sub(get_workdir() / "shift_first_frame.ass", [(timedelta(0), timedelta(milliseconds=30), "before first frame")])
+    timestamps = FPSTimestamps(RoundingMethod.ROUND, Fraction(1000), Fraction(24000, 1001), first_timestamps=Fraction(first_timestamps))
+    path = _write_sub(get_workdir() / "shift_first_frame.ass", [(timedelta(0), timedelta(milliseconds=end_ms), "before first frame")])
 
     sub = SubFile(path)
     sub.shift(0, timestamps)
