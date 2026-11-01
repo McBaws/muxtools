@@ -10,7 +10,7 @@ __all__ = ["apply_dynamic_tokens"]
 
 PROPERTIES = ["lang", "lang3", "lang3b", "language", "codec", "format", "ch", "channels", "res", "resolution", "depth", "bits"]
 TOKEN_REGEX = re.compile(
-    rf"(?:\$|#)(?P<type>(?:v|a|s))?(?P<prop>(?:{'|'.join(PROPERTIES)}))(?:(?:_(?P<num>\d+))|(?:_(?P<lang>[^_0-9\$\n]+)(?:_(?P<num2>\d+))?))?(?:\$|#)",
+    rf"(?:\$|#)(?P<type>(?:v|a|s))?(?P<prop>(?:{'|'.join(PROPERTIES)}))(?:(?:_(?P<num>\d+))|(?:_(?P<lang>[^_0-9\$#\s]+)(?:_(?P<num2>\d+))?))?(?:\$|#)",
     re.I,
 )
 # https://regex101.com/r/NYzJyz/1
@@ -153,13 +153,16 @@ def apply_dynamic_tokens(
 
         post_filter_index = 0 if groups["num2"] is None else int(groups["num2"])
 
-        track = source.find_tracks(
+        tracks = source.find_tracks(
             type=tracktype,
             lang=groups["lang"],
             relative_id=relative_id,
             error_if_empty=True,
             caller=caller,
-        )[post_filter_index]
+        )
+        if post_filter_index >= len(tracks):
+            raise error(f"Token '{match.group(0)}' requests match {post_filter_index} but only {len(tracks)} track(s) were found.", caller)
+        track = tracks[post_filter_index]
 
         replacement = _get_prop(str(groups["prop"]), track, user_lang, match.group(0), caller)
         new = new.replace(match.group(0), replacement)
