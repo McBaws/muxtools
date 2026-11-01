@@ -19,6 +19,7 @@ from ..utils.log import debug, error, info, warn, danger
 from ..utils.env import get_setup_attr, get_setup_dir, get_workdir, run_commandline
 from ..utils.files import ensure_path, ensure_path_exists, get_crc32, clean_temp_files
 from ..utils.probe import ParsedFile
+from ..utils.subprogress import run_mkvtoolnix_pb
 
 __all__ = ["mux"]
 
@@ -39,7 +40,7 @@ def mux(
     :param *tracks:     Any amount of track objects and a Chapters object
     :param tmdb:        A TMDB Config used for additional tagging if you so desire.
     :param outfile:     If you want to overwrite the output file path
-    :param quiet:       Whether or not to print the mkvmerge output
+    :param quiet:       Shows a progress bar instead of the mkvmerge output. The output is still printed if muxing fails.
     :param print_cli:   Print the final muxing command before running it if True
     """
     check_mkvmerge_version()
@@ -94,7 +95,7 @@ def mux(
         info(joincommand(args), "Mux")
 
     debug("Running the mux...", "Mux")
-    if run_commandline(args, quiet, mkvmerge=True) > 1:
+    if run_mkvtoolnix_pb(args, "Muxing...", quiet) > 1:
         raise error("Muxing failed!", "Mux")
 
     if not get_setup_attr("skip_mux_branding", False):
