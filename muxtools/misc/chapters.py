@@ -4,7 +4,7 @@ from datetime import timedelta
 from fractions import Fraction
 from pathlib import Path
 from typing import TypeVar, cast
-from video_timestamps import TimeType, ABCTimestamps
+from video_timestamps import TimeType, ABCTimestamps, FPSTimestamps
 import re
 
 from ..subtitle.sub import SubFile
@@ -23,7 +23,6 @@ __all__ = ["Chapters"]
 
 class Chapters:
     chapters: list[Chapter]
-    fps: Fraction | PathLike
     timestamps: ABCTimestamps
 
     def __init__(
@@ -40,7 +39,7 @@ class Chapters:
         :param timesource:          The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:           Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                     For details check the docstring on the type.
-        :param _print:              Prints chapters after parsing and after trimming.
+        :param _print:              Prints chapters after parsing a file.
         """
         self.timestamps = resolve_timesource_and_scale(timesource, timescale, caller=self)
         if isinstance(chapter_source, tuple):
@@ -64,49 +63,66 @@ class Chapters:
         if _print and isinstance(chapter_source, Path):
             self.print()
 
-    def trim(self: ChaptersSelf, trim_start: int = 0, trim_end: int = 0, num_frames: int = 0) -> ChaptersSelf:
-        """
-        Trims the chapters
-        """
-        if trim_start > 0:
-            chapters: list[Chapter] = []
-            for time_value, name in self.chapters:
-                if timedelta_to_frame(self.timestamps, time_value, TimeType.START) == 0:
-                    chapters.append((time_value, name))
-                    continue
-                if timedelta_to_frame(self.timestamps, time_value, TimeType.START) - trim_start < 0:
-                    continue
-                trim_start_ms = self.timestamps.frame_to_time(trim_start, TimeType.START, 3)
-                time_value = time_value - timedelta(milliseconds=trim_start_ms)
-                if num_frames:
-                    last_frame_ms = self.timestamps.frame_to_time(num_frames - 1, TimeType.START, 3)
-                    if time_value > timedelta(milliseconds=last_frame_ms):
-                        continue
-                chapters.append((time_value, name))
+    def _frame(self, time: timedelta) -> int:
+        return timedelta_to_frame(self.timestamps, time, TimeType.START)
 
-            self.chapters = chapters
-        if trim_end is not None and trim_end != 0:
-            if trim_end > 0:
-                chapters: list[Chapter] = []  # type: ignore[no-redef]
-                for chapter in self.chapters:
-                    if timedelta_to_frame(self.timestamps, chapter[0], TimeType.START) < trim_end:
-                        chapters.append(chapter)
-                self.chapters = chapters
+    def trim(self: ChaptersSelf, trim_start: int = 0, trim_end: int | None = 0, num_frames: int = 0) -> ChaptersSelf:
+        """
+        Trims the chapters the same way the video and audio are trimmed, keeping the frames from `trim_start` up to `trim_end`.\n
+        Both are frame numbers of the untrimmed source, like `clip[trim_start:trim_end]` in VapourSynth.
 
+        The chapter that is playing at `trim_start` is moved to the start, every chapter before it is dropped.
+
+        :param trim_start:  First frame to keep.
+        :param trim_end:    Frame to stop before. `0` or `None` keeps everything after `trim_start`.\n
+                            Negative values count back from the end of the source.
+                            Because the length of the source isn't known here, this requires `num_frames`.
+        :param num_frames:  Number of frames of the trimmed clip. Chapters that would start at or after its end are dropped.
+        """
+        trim_start = max(trim_start, 0)
+        trim_end = trim_end or None
+        if trim_end is not None and trim_end < 0:
+            if not num_frames:
+                raise error("A negative trim_end requires num_frames to be passed!", self)
+            # The end of the trimmed clip is already given by num_frames
+            trim_end = None
+
+        start_ms = self.timestamps.frame_to_time(trim_start, TimeType.START, 3)
+        chapters: list[Chapter] = []
+        for time_value, name in sorted(self.chapters, key=lambda chapter: chapter[0]):
+            frame = self._frame(time_value)
+            if trim_end is not None and frame >= trim_end:
+                continue
+
+            new_frame = max(frame - trim_start, 0)
+            if num_frames and new_frame >= num_frames:
+                continue
+
+            # Only the last chapter at or before trim_start stays, as it is the one playing when the trimmed clip starts
+            if new_frame == 0 and chapters and chapters[-1][0] == timedelta(0):
+                chapters.pop()
+
+            time_value = max(time_value - timedelta(milliseconds=start_ms), timedelta(0))
+            # Subtracting two millisecond values that were rounded on their own can land on the next frame
+            if isinstance(self.timestamps, FPSTimestamps) and self._frame(time_value) != new_frame:
+                time_value = timedelta(milliseconds=self.timestamps.frame_to_time(new_frame, TimeType.START, 3))
+            chapters.append((time_value, name))
+
+        self.chapters = chapters
         return self
 
     def set_names(self: ChaptersSelf, names: list[str | None]) -> ChaptersSelf:
         """
         Renames the chapters
 
-        :param names:   List of names
+        :param names:   List of names. Chapters without a name in the list are left unnamed.
         """
         old: list[str | None] = [chapter[1] for chapter in self.chapters]
         if len(names) > len(old):
             self.print()
             raise error("Chapters: too many names!", self)
         if len(names) < len(old):
-            names += [None] * (len(old) - len(names))
+            names = [*names, *([None] * (len(old) - len(names)))]
 
         chapters: list[Chapter] = []
         for i, name in enumerate(names):
@@ -118,7 +134,10 @@ class Chapters:
 
     def add(self: ChaptersSelf, chapters: LooseChapter | list[LooseChapter] | list[Chapter], index: int = 0) -> ChaptersSelf:
         """
-        Adds a chapter at the specified index
+        Adds one or more chapters at the specified index
+
+        :param chapters:    A chapter or a list of chapters. Times can be timedeltas or frame numbers.
+        :param index:       Position in the chapter list to insert the first chapter at.
         """
         if isinstance(chapters, tuple):
             chapters = [chapters]
@@ -162,7 +181,9 @@ class Chapters:
 
         :param shift_amount:    Frames to shift by
         """
-        return [self.shift_chapter(i, shift_amount) for i, _ in enumerate(self.chapters)][-1]
+        for i in range(len(self.chapters)):
+            self.shift_chapter(i, shift_amount)
+        return self
 
     def print(self: ChaptersSelf) -> ChaptersSelf:
         """
@@ -196,7 +217,7 @@ class Chapters:
                     time=format_timedelta(
                         (chapter[0] - timedelta(milliseconds=1)) if minus_one_ms_hack and chapter[0] > timedelta(milliseconds=0) else chapter[0]
                     ),
-                    name=chapter[1],
+                    name=chapter[1] or "",
                 )
                 for i, chapter in enumerate(sorted(self.chapters, key=lambda x: x[0]))
             ]
@@ -221,7 +242,7 @@ class Chapters:
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
         :param use_actor_field: Uses the actor field instead of the effect field for identification.
-        :param markers:         Markers to check for.
+        :param markers:         Markers to check for. Matching is case insensitive.
         :param _print:          Prints the chapters after parsing
         :param encoding:        Encoding used to read the ass file if need be
         """
@@ -231,15 +252,16 @@ class Chapters:
 
         if isinstance(markers, str):
             markers = [markers]
+        markers = [marker.lower() for marker in markers]
 
         if isinstance(file, SubFile):
             doc = file._read_doc()
         else:
             file = ensure_path_exists(file, caller)
-            with open(file if not file else file, "r", encoding=encoding) as reader:
+            with open(file, "r", encoding=encoding) as reader:
                 doc = parse_file(reader)
 
-        pattern = re.compile(r"\{([^\\=].+?)\}")
+        pattern = re.compile(r"\{([^\\=}][^}]*)\}")
         chapters = list[Chapter]()
         for line in doc.events:
             field_value = str(line.name).lower() if use_actor_field else str(line.effect).lower()
@@ -284,9 +306,13 @@ class Chapters:
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
         :param _print:          Prints the chapters after parsing
+        :param quiet:           Suppresses the mkvextract output
         """
         caller = "Chapters.from_mkv"
         file = ensure_path_exists(file, caller)
+        if timesource is None:
+            timesource = file
+            timescale = TimeScale.MKV if timescale is None else timescale
 
         mkvextract = get_executable("mkvextract")
         out = Path(get_temp_workdir(), f"{file.stem}_chapters.txt")
@@ -294,10 +320,11 @@ class Chapters:
         if run_commandline(args, quiet):
             raise error("Failed to extract chapters!", caller)
 
-        if timesource is None:
-            chapters = Chapters(out, file, _print=_print)
-        else:
-            chapters = Chapters(out, timesource, timescale, _print)
+        # mkvextract doesn't create a file at all if there are no chapters
+        if not out.exists():
+            raise error(f"'{file.name}' does not contain any chapters!", caller)
+
+        chapters = Chapters(out, timesource, timescale, _print)
 
         clean_temp_files()
         return chapters
