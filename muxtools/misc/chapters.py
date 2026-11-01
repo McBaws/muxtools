@@ -23,7 +23,6 @@ __all__ = ["Chapters"]
 
 class Chapters:
     chapters: list[Chapter]
-    fps: Fraction | PathLike
     timestamps: ABCTimestamps
 
     def __init__(
@@ -40,7 +39,7 @@ class Chapters:
         :param timesource:          The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:           Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                     For details check the docstring on the type.
-        :param _print:              Prints chapters after parsing and after trimming.
+        :param _print:              Prints chapters after parsing a file.
         """
         self.timestamps = resolve_timesource_and_scale(timesource, timescale, caller=self)
         if isinstance(chapter_source, tuple):
@@ -99,14 +98,14 @@ class Chapters:
         """
         Renames the chapters
 
-        :param names:   List of names
+        :param names:   List of names. Chapters without a name in the list are left unnamed.
         """
         old: list[str | None] = [chapter[1] for chapter in self.chapters]
         if len(names) > len(old):
             self.print()
             raise error("Chapters: too many names!", self)
         if len(names) < len(old):
-            names += [None] * (len(old) - len(names))
+            names = [*names, *([None] * (len(old) - len(names)))]
 
         chapters: list[Chapter] = []
         for i, name in enumerate(names):
@@ -118,7 +117,10 @@ class Chapters:
 
     def add(self: ChaptersSelf, chapters: LooseChapter | list[LooseChapter] | list[Chapter], index: int = 0) -> ChaptersSelf:
         """
-        Adds a chapter at the specified index
+        Adds one or more chapters at the specified index
+
+        :param chapters:    A chapter or a list of chapters. Times can be timedeltas or frame numbers.
+        :param index:       Position in the chapter list to insert the first chapter at.
         """
         if isinstance(chapters, tuple):
             chapters = [chapters]
@@ -162,7 +164,9 @@ class Chapters:
 
         :param shift_amount:    Frames to shift by
         """
-        return [self.shift_chapter(i, shift_amount) for i, _ in enumerate(self.chapters)][-1]
+        for i in range(len(self.chapters)):
+            self.shift_chapter(i, shift_amount)
+        return self
 
     def print(self: ChaptersSelf) -> ChaptersSelf:
         """
@@ -196,7 +200,7 @@ class Chapters:
                     time=format_timedelta(
                         (chapter[0] - timedelta(milliseconds=1)) if minus_one_ms_hack and chapter[0] > timedelta(milliseconds=0) else chapter[0]
                     ),
-                    name=chapter[1],
+                    name=chapter[1] or "",
                 )
                 for i, chapter in enumerate(sorted(self.chapters, key=lambda x: x[0]))
             ]
@@ -221,7 +225,7 @@ class Chapters:
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
         :param use_actor_field: Uses the actor field instead of the effect field for identification.
-        :param markers:         Markers to check for.
+        :param markers:         Markers to check for. Matching is case insensitive.
         :param _print:          Prints the chapters after parsing
         :param encoding:        Encoding used to read the ass file if need be
         """
@@ -231,15 +235,16 @@ class Chapters:
 
         if isinstance(markers, str):
             markers = [markers]
+        markers = [marker.lower() for marker in markers]
 
         if isinstance(file, SubFile):
             doc = file._read_doc()
         else:
             file = ensure_path_exists(file, caller)
-            with open(file if not file else file, "r", encoding=encoding) as reader:
+            with open(file, "r", encoding=encoding) as reader:
                 doc = parse_file(reader)
 
-        pattern = re.compile(r"\{([^\\=].+?)\}")
+        pattern = re.compile(r"\{([^\\=}][^}]*)\}")
         chapters = list[Chapter]()
         for line in doc.events:
             field_value = str(line.name).lower() if use_actor_field else str(line.effect).lower()
@@ -284,9 +289,13 @@ class Chapters:
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
         :param _print:          Prints the chapters after parsing
+        :param quiet:           Suppresses the mkvextract output
         """
         caller = "Chapters.from_mkv"
         file = ensure_path_exists(file, caller)
+        if timesource is None:
+            timesource = file
+            timescale = TimeScale.MKV if timescale is None else timescale
 
         mkvextract = get_executable("mkvextract")
         out = Path(get_temp_workdir(), f"{file.stem}_chapters.txt")
@@ -294,10 +303,11 @@ class Chapters:
         if run_commandline(args, quiet):
             raise error("Failed to extract chapters!", caller)
 
-        if timesource is None:
-            chapters = Chapters(out, file, _print=_print)
-        else:
-            chapters = Chapters(out, timesource, timescale, _print)
+        # mkvextract doesn't create a file at all if there are no chapters
+        if not out.exists():
+            raise error(f"'{file.name}' does not contain any chapters!", caller)
+
+        chapters = Chapters(out, timesource, timescale, _print)
 
         clean_temp_files()
         return chapters
