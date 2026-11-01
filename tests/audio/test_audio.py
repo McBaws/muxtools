@@ -36,6 +36,39 @@ def test_lossy_input_no_encode():
     assert get_md5_for_stream(out.file) == "3fe4c6674cc3b2ffc3ba3247c91ed622"
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [dict(), dict(encoder=None), dict(trimmer=None), dict(trimmer=None, encoder=None), dict(trims=(24, None))],
+    ids=["defaults", "no-encoder", "no-trimmer", "no-trimmer-no-encoder", "trimmed"],
+)
+def test_do_audio_output(kwargs: dict) -> None:
+    output = get_workdir() / "custom_output"
+
+    out = do_audio(sample_file_aac, output=output, **kwargs)
+
+    assert out.file.with_suffix("") == output.resolve()
+    assert out.file.exists()
+
+
+def test_do_audio_output_dir() -> None:
+    output = get_workdir() / "out"
+    output.mkdir()
+
+    out = do_audio(sample_file_aac, output=output)
+
+    assert out.file.with_suffix("") == (output / "aac_source").resolve()
+    assert out.file.exists()
+
+
+@pytest.mark.parametrize("source", [sample_file_aac, sample_file_flac], ids=["lossy", "lossless"])
+def test_do_audio_list(source) -> None:
+    single = do_audio(source, encoder=None)
+    out = do_audio([source, source], encoder=None, output=get_workdir() / "concat")
+
+    assert out.file.stem == "concat"
+    assert out.duration == single.duration * 2
+
+
 @pytest.mark.parametrize("preserve_delay", [False, True])
 def test_lossy_multi_trim_starts_at_zero(preserve_delay: bool) -> None:
     source = AudioFile.from_file(sample_file_aac, None)

@@ -1,5 +1,7 @@
 from fractions import Fraction
 from datetime import timedelta
+from pathlib import Path
+from shutil import move
 
 from .utils.log import warn, error, info, danger
 from .utils.types import TimeScaleT, TimeScale, TimeSourceT
@@ -7,7 +9,7 @@ from .muxing.muxfiles import AudioFile
 from .audio.encoders import Opus
 from .utils.types import PathLike, Trim
 from .audio.extractors import FFMpeg, Sox
-from .utils.files import ensure_path, ensure_path_exists
+from .utils.files import ensure_path, ensure_path_exists, make_output
 from .audio.tools import AutoEncoder, AutoTrimmer, AutoExtractor, Encoder, Trimmer, Extractor, LosslessEncoder
 from .utils.convert import format_timedelta
 
@@ -46,20 +48,27 @@ def do_audio(
 
     :param quiet:           Whether the tool output should be visible
     :param output:          Custom output file or directory, extensions will be automatically added
+                            Not used if the input file is returned as is because nothing had to be done.
     :return:                AudioFile Object containing file path, delays and source
     """
+    if isinstance(extractor, AutoExtractor):
+        extractor = FFMpeg.Extractor()
+
     if isinstance(fileIn, list) and (not extractor or not isinstance(extractor, FFMpeg.Extractor)):
         raise error("When passing a list of files you have to use the FFMpeg extractor!", do_audio)
 
-    if isinstance(extractor, AutoExtractor):
-        extractor = FFMpeg.Extractor()
+    will_trim = bool(trimmer and trims)
+    # An AutoEncoder can still decide not to encode once the format is known
+    extraction_is_last = not will_trim and not encoder
+    output_used = False
 
     if extractor:
         setattr(extractor, "track", track)
         if encoder and not isinstance(encoder, LosslessEncoder):
             setattr(extractor, "skip_analysis", True)
-        if not trimmer and not encoder:
+        if extraction_is_last and not isinstance(fileIn, list):
             setattr(extractor, "output", output)
+            output_used = True
         if isinstance(fileIn, list):
             info(f"Extracting audio from {len(fileIn)} files to concatenate...", do_audio)
             extractor._no_print = True
@@ -69,7 +78,7 @@ def do_audio(
                 f = ensure_path_exists(f, do_audio)
                 try:
                     af = extractor.extract_audio(f, quiet, True, True)
-                except:
+                except Exception:
                     setattr(extractor, "track", 0)
                     af = extractor.extract_audio(f, quiet, True, True)
                     setattr(extractor, "track", track)
@@ -82,7 +91,8 @@ def do_audio(
                     warn(f"Fell back to track 0 for '{f.name}' with a duration of {duration}", do_audio)
 
                 extracted.append(af)
-            audio = FFMpeg.Concat(extracted).concat_audio()
+            audio = FFMpeg.Concat(extracted, output if extraction_is_last else None).concat_audio()
+            output_used = extraction_is_last
         else:
             audio = extractor.extract_audio(fileIn, quiet)
     else:
@@ -117,6 +127,7 @@ def do_audio(
         setattr(trimmer, "num_frames", num_frames)
         if not encoder:
             setattr(trimmer, "output", output)
+            output_used = True
         trimmed = trimmer.trim_audio(audio, quiet)
         if extractor:
             ensure_path(audio.file, do_audio).unlink(missing_ok=True)
@@ -124,10 +135,16 @@ def do_audio(
 
     if encoder:
         setattr(encoder, "output", output)
+        output_used = True
         encoded = encoder.encode_audio(audio, quiet)
         if extractor or (trimmer and trims):
             ensure_path(audio.file, do_audio).unlink(missing_ok=True)
         audio = encoded
+
+    if output and not output_used and extractor:
+        # The AutoEncoder chose not to encode, so the extracted file is the final one
+        destination = make_output(audio.source or audio.file, audio.file.suffix[1:], user_passed=output)
+        audio.file = Path(move(audio.file, destination))
 
     print("")
     return audio
