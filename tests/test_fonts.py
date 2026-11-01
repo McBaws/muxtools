@@ -403,6 +403,40 @@ def test_subset_checks_renamed_subs(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         _subset([sub], source)
 
 
+@pytest.mark.parametrize("fix_vsfilter_names", [True, False])
+def test_collect_fonts_vsfilter_truncated_names(tmp_path: Path, fix_vsfilter_names: bool) -> None:
+    """
+    Names that VSFilter resolves differently, as they only differ after 31 characters, are replaced with a name that works in both.
+    Without fix_vsfilter_names, that name is only suggested.
+    """
+    source = tmp_path / "fonts"
+    source.mkdir()
+    # Both family names start with 'MT A Very Long Font Family Name', but the PostScript names don't
+    _make_font(source / "regular.otf", "MT A Very Long Font Family Name Regular")
+    _make_font(source / "bold.otf", "MT A Very Long Font Family Name Bold", bold=True)
+    sub = _write_sub(
+        tmp_path / "sub.ass",
+        [("Default", "MT A Very Long Font Family Name Regular")],
+        [("Default", "abc"), ("Default", R"{\fnMT A Very Long Font Family Name Bold}def")],
+    )
+
+    with _warnings() as warnings:
+        collect_fonts(sub, use_system_fonts=False, search_current_dir=False, additional_fonts=source, fix_vsfilter_names=fix_vsfilter_names)
+    vsfilter_warnings = [warning for warning in warnings if "VSFilter" in warning]
+    doc = sub._read_doc()
+
+    # The style's name resolves the same in both, so it's left alone
+    assert doc.styles[0].fontname == "MT A Very Long Font Family Name Regular"
+    if fix_vsfilter_names:
+        assert not vsfilter_warnings
+        assert doc.events[1].text == R"{\fnMTAVeryLongFontFamilyNameBold-Bold}def"
+    else:
+        assert len(vsfilter_warnings) == 1
+        assert "'MT A Very Long Font Family Name Bold'" in vsfilter_warnings[0]
+        assert "Using 'MTAVeryLongFontFamilyNameBold-Bold' instead" in vsfilter_warnings[0]
+        assert doc.events[1].text == R"{\fnMT A Very Long Font Family Name Bold}def"
+
+
 def test_subset_vsfilter_truncated_names(tmp_path: Path) -> None:
     """
     Fonts that VSFilter can't tell apart, as their names only differ after 31 characters, are renamed even when they aren't subset.
@@ -421,7 +455,10 @@ def test_subset_vsfilter_truncated_names(tmp_path: Path) -> None:
     with _warnings() as warnings:
         subset = _subset([sub], source, target_fonts=[])
 
-    assert len([warning for warning in warnings if "VSFilter" in warning]) == 2
+    # No other name of these fonts works in both, so collect_fonts points to subset_fonts
+    vsfilter_warnings = [warning for warning in warnings if "VSFilter" in warning]
+    assert len(vsfilter_warnings) == 2
+    assert all("subset_fonts fixes this" in warning for warning in vsfilter_warnings)
     regular, bold = (font["name"].getDebugName(1) or "" for font in _by_weight(subset))
     assert regular[:31] != bold[:31]
     assert sub._read_doc().styles[0].fontname == regular

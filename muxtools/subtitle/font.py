@@ -100,6 +100,32 @@ def _replace_font_tags(text: str, replacements: dict[str, str]) -> str:
     return re.sub(r"\{[^}]*\}", replace_block, text)
 
 
+def _replace_font_names_in_sub(sub: SubFile, replacements: dict[str, str]) -> bool:
+    """
+    Replaces the font names in the styles and font tags of a sub.
+
+    :return:    Whether anything was replaced
+    """
+    doc = sub._read_doc()
+    modified = False
+
+    for style in doc.styles:
+        new_name = _replace_font_name(style.fontname, replacements)
+        if new_name != style.fontname:
+            style.fontname = new_name
+            modified = True
+
+    for event in doc.events:
+        new_text = _replace_font_tags(event.text, replacements)
+        if new_text != event.text:
+            event.text = new_text
+            modified = True
+
+    if modified:
+        sub._update_doc(doc)
+    return modified
+
+
 def _is_already_subset(font_face: ABCFontFace) -> bool:
     from fontTools.ttLib import TTFont  # type: ignore[import-untyped]
 
@@ -222,12 +248,7 @@ def subset_fonts(
             vsfilter_result = font_collection.get_used_font_by_style(style, vsfilter_strategy)
             if vsfilter_result is None or vsfilter_result.font_face != result.font_face:
                 if result.font_face not in ambiguous_faces:
-                    warn(
-                        f"Font '{style.fontname}' renders as '{_get_fontname(result.font_face)}' in libass "
-                        f"but as '{_get_fontname(vsfilter_result.font_face) if vsfilter_result else None}' in VSFilter, "
-                        "which only compares the first 31 characters of font names. It will be renamed so both use the former.",
-                        subset_fonts,
-                    )
+                    info(f"Renaming '{_get_fontname(result.font_face)}' so VSFilter uses it for '{style.fontname}' like libass does.", subset_fonts)
                 ambiguous_faces.add(result.font_face)
 
     faces_by_file: dict[Path, list[ABCFontFace]] = defaultdict(list)
@@ -381,23 +402,7 @@ def subset_fonts(
 
     if replacements:
         for sub in subs:
-            doc = sub._read_doc()
-            modified = False
-
-            for style in doc.styles:
-                new_name = _replace_font_name(style.fontname, replacements)
-                if new_name != style.fontname:
-                    style.fontname = new_name
-                    modified = True
-
-            for event in doc.events:
-                new_text = _replace_font_tags(event.text, replacements)
-                if new_text != event.text:
-                    event.text = new_text
-                    modified = True
-
-            if modified:
-                sub._update_doc(doc)
+            if _replace_font_names_in_sub(sub, replacements):
                 info(f"Updated font names in subfile '{sub.file.name}'", subset_fonts)
 
     _check_subset_usages(subs, usages, replacements, output_files, output_faces)
@@ -563,6 +568,7 @@ def collect_fonts(
     additional_fonts: PathLike | list[PathLike] = [],
     collect_draw_fonts: bool = True,
     use_ntfs_compliant_names: bool | None = None,
+    fix_vsfilter_names: bool = False,
 ) -> list[MTFontFile]:
     """
     Collects the fonts used by one or more subtitles, loading the font files only once.
@@ -577,6 +583,9 @@ def collect_fonts(
                                         See https://github.com/libass/libass/issues/617 for details.
     :param use_ntfs_compliant_names:    Ensure that filenames will work on NTFS (Windows) filesystems.
                                         The default `None` only does this when running on Windows.
+    :param fix_vsfilter_names:          VSFilter only compares the first 31 characters of font names, so it can pick a different font than libass
+                                        when two names start the same. If enabled, such names are replaced with another name of the same font
+                                        that works in both, if there is one. Otherwise, they're only warned about.
 
     :return:                            A list of FontFile objects
     """
@@ -585,7 +594,9 @@ def collect_fonts(
     if not isinstance(additional_fonts, list):
         additional_fonts = [additional_fonts]
 
-    return _collect_fonts(subs, use_system_fonts, search_current_dir, additional_fonts, collect_draw_fonts, False, use_ntfs_compliant_names)
+    return _collect_fonts(
+        subs, use_system_fonts, search_current_dir, additional_fonts, collect_draw_fonts, False, use_ntfs_compliant_names, fix_vsfilter_names
+    )
 
 
 def _collect_fonts(
@@ -596,6 +607,7 @@ def _collect_fonts(
     collect_draw_fonts: bool,
     error_missing: bool,
     use_ntfs_compliant_names: bool | None,
+    fix_vsfilter_names: bool,
 ) -> list[MTFontFile]:
     if search_current_dir:
         additional_fonts = [*additional_fonts, os.getcwd()]
@@ -627,7 +639,7 @@ def _collect_fonts(
 
     set_loglevel(logging.CRITICAL)
 
-    from font_collector import AssDocument, FontLoader, FontCollection, FontSelectionStrategyLibass, ABCFontFace, VariableFontFace
+    from font_collector import AssDocument, AssStyle, FontLoader, FontCollection, FontSelectionStrategyLibass, ABCFontFace, VariableFontFace
 
     font_collection = FontCollection(
         use_system_fonts, additional_fonts=FontLoader.load_additional_fonts(resolved_paths, scan_subdirs=True) if resolved_paths else []
@@ -637,11 +649,13 @@ def _collect_fonts(
     found_fonts = list[MTFontFile]()
     # Track source path -> workdir copy so TTC files aren't duplicated per-face
     copied_sources: dict[Path, Path] = {}
+    used_styles = set[AssStyle]()
 
     for sub in subs:
         info(f"Collecting fonts for '{sub.file.stem}'...", sub)
         doc = AssDocument(sub._read_doc())
         styles = doc.get_used_style(collect_draw_fonts)
+        used_styles.update(styles)
 
         collected_faces = set[ABCFontFace]()
 
@@ -699,7 +713,83 @@ def _collect_fonts(
                 if len(missing_glyphs) != 0:
                     danger(f"'{fontname}' is missing the following glyphs: {missing_glyphs}", collect_fonts)
 
+    _check_vsfilter_names(subs, used_styles, fix_vsfilter_names)
+
     for r in ["*.[tT][tT][fF]", "*.[oO][tT][fF]", "*.[tT][tT][cC]", "*.[oO][tT][cC]"]:
         for f in get_workdir().glob(r):
             found_fonts.append(MTFontFile(f))
     return found_fonts
+
+
+def _check_vsfilter_names(subs: list[SubFile], styles: set[AssStyle], fix: bool) -> None:
+    """
+    Finds font names that VSFilter resolves to a different font in the workdir than libass, as it only compares their first 31 characters.
+    If another name of the font works in both, it replaces them in the subs when `fix` is set and is suggested otherwise.
+    """
+    # VSFilter compares shorter names in full, just like libass
+    long_styles = [style for style in styles if len(style.fontname.encode("utf-16-le")) >= 62]
+    if not long_styles:
+        return
+
+    from font_collector import AssStyle, FontLoader, FontCollection, FontSelectionStrategyLibass, FontSelectionStrategyVSFilter
+
+    strategies = (FontSelectionStrategyLibass(), FontSelectionStrategyVSFilter())
+    font_collection = FontCollection(
+        use_system_font=False,
+        reload_system_font=False,
+        use_generated_fonts=False,
+        additional_fonts=FontLoader.load_additional_fonts([get_workdir()], scan_subdirs=False),
+    )
+
+    usages_by_name: dict[str, list[tuple[AssStyle, FontResult]]] = defaultdict(list)
+    for style in long_styles:
+        result = font_collection.get_used_font_by_style(style, strategies[0])
+        if result is not None:
+            usages_by_name[style.fontname.lower()].append((style, result))
+
+    def works_in_both(name: str, usages: list[tuple[AssStyle, FontResult]]) -> bool:
+        for style, result in usages:
+            for strategy in strategies:
+                new_result = font_collection.get_used_font_by_style(AssStyle(name, style.weight, style.italic), strategy)
+                if (
+                    new_result is None
+                    or new_result.font_face != result.font_face
+                    or (new_result.mismatch_bold, new_result.need_faux_bold, new_result.mismatch_italic)
+                    != (result.mismatch_bold, result.need_faux_bold, result.mismatch_italic)
+                ):
+                    return False
+        return True
+
+    replacements: dict[str, str] = {}
+    for usages in usages_by_name.values():
+        mismatch = None
+        for style, result in usages:
+            vsfilter_result = font_collection.get_used_font_by_style(style, strategies[1])
+            if vsfilter_result is None or vsfilter_result.font_face != result.font_face:
+                mismatch = (style, result, vsfilter_result)
+                break
+        if mismatch is None:
+            continue
+
+        style, result, vsfilter_result = mismatch
+        names = dict.fromkeys(
+            name.value for _, usage_result in usages for name in [*usage_result.font_face.family_names, *usage_result.font_face.exact_names]
+        )
+        alternative = next((name for name in names if name.lower() != style.fontname.lower() and works_in_both(name, usages)), None)
+
+        problem = (
+            f"Font '{style.fontname}' renders as '{_get_fontname(result.font_face)}' in libass "
+            f"but as '{_get_fontname(vsfilter_result.font_face) if vsfilter_result else None}' in VSFilter, "
+            "which only compares the first 31 characters of font names."
+        )
+        if alternative is None:
+            warn(f"{problem} No other name of the font works the same in both, but subset_fonts fixes this by renaming the fonts.", collect_fonts)
+        elif fix:
+            info(f"{problem} Replacing it with '{alternative}', which works the same in both.", collect_fonts)
+            replacements[style.fontname.lower()] = alternative
+        else:
+            warn(f"{problem} Using '{alternative}' instead works the same in both, which fix_vsfilter_names does automatically.", collect_fonts)
+
+    if replacements:
+        for sub in subs:
+            _replace_font_names_in_sub(sub, replacements)

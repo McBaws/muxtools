@@ -580,6 +580,7 @@ class SubFile(BaseSubFile):
         collect_draw_fonts: bool = True,
         error_missing: bool = False,
         use_ntfs_compliant_names: bool | None = None,
+        fix_vsfilter_names: bool = False,
     ) -> list[FontFile]:
         """
         Collects the fonts used by this subtitle.
@@ -599,6 +600,9 @@ class SubFile(BaseSubFile):
                                             Use `error_on_danger` in the Setup instead.
         :param use_ntfs_compliant_names:    Ensure that filenames will work on NTFS (Windows) filesystems.
                                             The default `None` only does this when running on Windows.
+        :param fix_vsfilter_names:          VSFilter only compares the first 31 characters of font names, so it can pick a different font than libass
+                                            when two names start the same. If enabled, such names are replaced with another name of the same font
+                                            that works in both, if there is one. Otherwise, they're only warned about.
 
         :return:                            A list of FontFile objects
         """
@@ -612,7 +616,14 @@ class SubFile(BaseSubFile):
             warn("The 'error_missing' parameter is deprecated.\nPlease use the 'error_on_danger' variable on the Setup.", self)
 
         return _collect_fonts(
-            [self], use_system_fonts, search_current_dir, additional_fonts, collect_draw_fonts, error_missing, use_ntfs_compliant_names
+            [self],
+            use_system_fonts,
+            search_current_dir,
+            additional_fonts,
+            collect_draw_fonts,
+            error_missing,
+            use_ntfs_compliant_names,
+            fix_vsfilter_names,
         )
 
     def restyle(self, styles: Style | list[Style], clean_after: bool = True, delete_existing: bool = False, adjust_styles: bool = True) -> Self:
