@@ -7,7 +7,7 @@ from ..utils.files import get_crc32
 
 __all__ = ["replace_crc"]
 
-CRC_REGEX = re.compile(r"[\.| |\[|\(|-](?P<crc>[0-9A-Z]{8})[\.| |\]|\)|-]")
+CRC_REGEX = re.compile(r"[\.| |\[|\(|-](?P<crc>[0-9A-F]{8}|[0-9a-f]{8})[\.| |\]|\)|-]")
 
 
 def replace_crc(file: Path, caller: Any | None = None) -> Path:
@@ -25,7 +25,7 @@ def replace_crc(file: Path, caller: Any | None = None) -> Path:
     debug(f"Generating new CRC-32 for file '{file.name}'...", caller)
     new = get_crc32(file).upper()
 
-    if new == match.group(1):
+    if new == match.group(1).upper():
         debug("New crc matches input!", caller)
         return file
 

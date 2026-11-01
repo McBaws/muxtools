@@ -4,7 +4,7 @@ from typing import Self, Sequence
 from .helper_util import replace_crc
 from ..misc import Chapters
 from ..muxing.token_handling import _apply_tokens_via_track
-from ..utils import PathLike, ensure_path_exists, make_output, ensure_path, get_executable, run_commandline, clean_temp_files, ParsedFile, TrackType
+from ..utils import PathLike, ensure_path_exists, make_output, ensure_path, get_executable, run_commandline, ParsedFile, TrackType
 from ..utils.files import create_tags_xml
 from ..utils.log import error
 from ..utils.language_util import standardize_tag
@@ -15,6 +15,7 @@ __all__ = ["MKVPropEdit"]
 class MKVPropEdit:
     _main_args: list[str]
     _track_args: list[str]
+    _tags: list[tuple[str, str, dict[str, str]]]
     _fileIn: Path
     _parsed: ParsedFile
     _has_info: bool = False
@@ -45,6 +46,7 @@ class MKVPropEdit:
         self._parsed = ParsedFile.from_file(self._fileIn, self)
         self._main_args = []
         self._track_args = []
+        self._tags = []
 
         if track_statistics is not None:
             self._main_args.append("--add-track-statistics-tags" if track_statistics else "--delete-track-statistics-tags")
@@ -60,13 +62,11 @@ class MKVPropEdit:
                     raise error("Chapters have to be a txt or xml file.", self)
                 self._main_args.extend(["-c", str(chapters)])
         if tags is not None:
-            out = ""
-            if len(tags) > 0:
-                if self._parsed.container_info.tags:
-                    tags = dict(**self._parsed.container_info.tags) | tags
-                out = make_output(fileIn, "xml", "global_tags", temp=True)
-                create_tags_xml(out, tags)
-            self._main_args.extend(["-t", f"global:{str(out)}"])
+            if len(tags) > 0 and self._parsed.container_info.tags:
+                # ffprobe reports the segment title, date and muxing application as tags too
+                existing = {k: v for k, v in self._parsed.container_info.tags.items() if k not in ["title", "creation_time", "encoder"]}
+                tags = existing | tags
+            self._tags.append(("global", "global_tags", tags))
 
     def _edit_args(self, name: str, value: bool | str | None) -> list[str]:
         if value is None:
@@ -95,7 +95,6 @@ class MKVPropEdit:
     ):
         selector = type if index <= 0 else f"track:{type}{index}"
         if tags is not None and type != "info":
-            out = ""
             if len(tags) > 0:
                 match type:
                     case "v":
@@ -107,10 +106,8 @@ class MKVPropEdit:
                 track = self._parsed.find_tracks(type=tracktype, relative_id=index - 1, error_if_empty=True, caller=self)[0]
                 if track.other_tags:
                     tags = dict(**track.other_tags) | tags
-                out = make_output(self._fileIn, "xml", f"{type}{index}_tags", temp=True)
-                create_tags_xml(out, tags)
-            self._main_args.extend(["-t", f"{selector}:{str(out)}"])
-        if not any([not_none for not_none in (title, language, default, forced) if not_none is not None]) and not kwargs:
+            self._tags.append((selector, f"{type}{index}_tags", tags))
+        if all(value is None for value in (title, language, default, forced, *kwargs.values())):
             return
 
         args = ["-e", selector]
@@ -296,11 +293,24 @@ class MKVPropEdit:
         :return:                    Returns the path and a boolean indicating the success.\n
                                     This may be a new path when a CRC32 was detected, swapped and the file renamed.
         """
-        if not self._main_args and not self._track_args:
+        if not self._main_args and not self._track_args and not self._tags:
             raise error("No changes made to the file!", self)
-        args = [str(self._executable), str(self._fileIn)] + self._main_args + self._track_args
+
+        # Only written now so that other instances cleaning the temp dir don't delete them
+        tag_args = list[str]()
+        tag_files = list[Path]()
+        for selector, suffix, tags in self._tags:
+            out = ""
+            if len(tags) > 0:
+                out = make_output(self._fileIn, "xml", suffix, temp=True)
+                create_tags_xml(out, tags)
+                tag_files.append(out)
+            tag_args.extend(["-t", f"{selector}:{str(out)}"])
+
+        args = [str(self._executable), str(self._fileIn)] + self._main_args + tag_args + self._track_args
         code = run_commandline(args, quiet, mkvmerge=True)
-        clean_temp_files()
+        for f in tag_files:
+            f.unlink(missing_ok=True)
         if code > 1 and error_on_failure:
             raise error(f"Failed to edit properties for '{self._fileIn.name}'!")
 
