@@ -32,8 +32,12 @@ def ensure_path(pathIn: PathLike | Sequence[PathLike] | GlobSearch | FileMixin, 
         if isinstance(pathIn, FileMixin):
             pathIn = pathIn.file
         if isinstance(pathIn, GlobSearch):
+            if not pathIn.paths:
+                raise crit("The glob search did not find any files.", caller)
             pathIn = pathIn.paths
         if isinstance(pathIn, Sequence) and not isinstance(pathIn, str):
+            if not pathIn:
+                raise crit("Path cannot be an empty list.", caller)
             pathIn = pathIn[0]
 
         if not isinstance(pathIn, Path) and not isinstance(pathIn, str):

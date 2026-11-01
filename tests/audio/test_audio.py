@@ -1,5 +1,6 @@
 from muxtools import ensure_path, Setup, get_workdir, do_audio, get_executable, Opus, Sox, FFMpeg, VideoMeta, FLAC, AudioFile
 from muxtools.utils.env import communicate_stdout
+from muxtools.audio.audioutils import sanitize_trims
 from time import sleep
 from shutil import rmtree
 import pytest
@@ -125,3 +126,25 @@ def test_opus_no_extractor(caplog):
     Opus().encode_audio(sample_file_thd_fake24)
     assert len([record for record in caplog.get_records("call") if "Encoding 'thd_source_fake24' to Opus (320 kbps)" in record.message]) == 1
     assert len([record for record in caplog.get_records("call") if "Piping audio" in record.message]) == 1
+
+
+def test_opus_mono_bitrate(caplog):
+    caplog.set_level(logging.DEBUG)
+    ffmpeg = get_executable("ffmpeg")
+    mono = get_workdir() / "mono.flac"
+    assert communicate_stdout([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(sample_file_flac), "-ac", "1", str(mono)])[0] == 0
+
+    Opus().encode_audio(mono)
+    assert len([record for record in caplog.get_records("call") if "Encoding 'mono' to Opus (128 kbps)" in record.message]) == 1
+
+
+def test_ms_trims_negative_values():
+    with pytest.raises(Exception, match="milliseconds"):
+        sanitize_trims([(1000, -500)], 34000, uses_frames=False)
+    with pytest.raises(Exception, match="milliseconds"):
+        sanitize_trims([(0, 100), (1000, -500)], 34000, uses_frames=False)
+
+    # Padding doesn't need to know the total frames
+    assert sanitize_trims([(-500, None)], uses_frames=False, allow_negative_start=True) == [(-500, None)]
+    assert sanitize_trims([(-24, None)], allow_negative_start=True) == [(-24, None)]
+    assert sanitize_trims([(24, -24)], 1000) == [(24, 976)]

@@ -181,20 +181,20 @@ def sanitize_trims(
         if trim[0] and trim[0] < 0 and not allow_negative_start and index == 0:
             raise error("The first part of a trim cannot be negative.", caller)
 
-        has_negative = (trim[1] is not None and trim[1] < 0) or (trim[0] is not None and trim[0] < 0)
-        if not uses_frames and has_negative and index != 0:
+        negative_end = trim[1] is not None and trim[1] < 0
+        # A negative start of the first trim is padding and doesn't need the total frames
+        negative_start = trim[0] is not None and trim[0] < 0 and not (allow_negative_start and index == 0)
+        if not uses_frames and (negative_end or negative_start):
             raise error("If you use milliseconds to trim you cannot use negative values.")
 
-        if not total_frames and has_negative:
+        if not total_frames and (negative_end or negative_start):
             raise error("If you want to use negative trims you gotta pass a total frame number.")
 
-        if trim[1] is not None and trim[1] < 0:
+        if negative_end:
             trim = (trim[0], total_frames + trim[1])
             trims[index] = trim
 
-        if trim[0] is not None and trim[0] < 0:
-            if allow_negative_start and index == 0:
-                continue
+        if negative_start:
             trims[index] = (total_frames + trim[0], trim[1])
 
     return trims
@@ -247,17 +247,10 @@ def has_libFDK() -> bool:
 
 def qaac_compatcheck() -> str:
     """
-    Checks if the qAAC installation has libflac and returns the qaac version.
+    Returns the version of the qaac installation.
     """
     exe = get_executable("qaac")
     _, readout = communicate_stdout([exe, "--check"])
-    if "libflac" not in readout.lower():
-        raise error(
-            "Your installation of qaac does not have libFLAC.\nIt is needed for proper piping from ffmpeg etc."
-            + "\nYou can download it from https://github.com/xiph/flac/releases or run muxtools deps"
-            + "\nFor installation check https://github.com/nu774/qaac/wiki/Installation",
-            "QAAC",
-        )
 
     if match := re.search(r"qaac (\d+\.\d+(?:\.\d+)?)", readout, re.I):
         return match.group(1)

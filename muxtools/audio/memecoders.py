@@ -154,7 +154,7 @@ class LossyWav(Encoder):
 
     :param quality:             Lossywav Quality Preset
     :param target_encoder:      Whatever encoder the lossy wav file will be fed to. (lossless encoders only)
-                                Only properly supports libFLAC and wavpack (will be added later) out of what we have.
+                                Only properly supports libFLAC and Wavpack out of what we have.
 
     :param override_options:    Automatically sets the appropriate options for each encoder to work as intended.
     :param limit:               Frequency cutoff in hz.
