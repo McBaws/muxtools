@@ -272,7 +272,8 @@ class BaseSubFile(ABC, MuxingFile):
 
         # Whole milliseconds without going through a float, see timedelta_to_frame
         end_ms = line.end // timedelta(milliseconds=1)
-        zero_length = Fraction(end_ms, 1000) <= timestamps.first_timestamps
+        # Same check time_to_frame does, first_timestamps itself isn't rounded to the time scale
+        zero_length = Fraction(end_ms, 1000) <= timestamps.frame_to_time(0, TimeType.EXACT)
         if zero_length:
             end_frame = start_frame
         else:
