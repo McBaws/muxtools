@@ -10,6 +10,7 @@ sample_file_aac = test_dir / "test-data" / "audio" / "aac_source.m4a"
 sample_file_flac = test_dir / "test-data" / "audio" / "flac_source.flac"
 sample_file_wav = test_dir / "test-data" / "audio" / "wav_source.wav"
 sample_file_thd_fake24 = test_dir / "test-data" / "audio" / "thd_source_fake24.thd"
+sample_file_eac3_mkv = test_dir / "test-data" / "sample-files" / "H265-Opus-EAC3-sample.mkv"
 
 
 def get_md5_for_stream(file) -> str:
@@ -66,6 +67,27 @@ def test_sox_multi_trim_with_padding(sample_file, preserve_delay: bool) -> None:
     assert get_md5_for_stream(out.file) == "c1739f08d9e17219ed8f932943bb4a8d"
     assert out.container_delay == (123 if preserve_delay else 0)
     assert out.source == source.source
+
+
+@pytest.mark.parametrize("preserve_delay", [False, True])
+def test_lossy_multi_trim_keeps_delay(preserve_delay: bool) -> None:
+    source = AudioFile.from_file(sample_file_aac, None)
+    source.container_delay = 123
+
+    single = FFMpeg.Trimmer(trim=(24, 48), preserve_delay=preserve_delay).trim_audio(source)
+    multi = FFMpeg.Trimmer(trim=[(24, 48), (72, 96)], preserve_delay=preserve_delay).trim_audio(source)
+
+    # Both start at the same frame so they need the same delay
+    assert multi.container_delay == single.container_delay
+    assert (single.container_delay > 100) == preserve_delay
+
+
+@pytest.mark.parametrize("preserve_delay", [False, True])
+def test_extractor_container_delay(preserve_delay: bool) -> None:
+    # The EAC3 track in this sample starts 13 ms in
+    out = FFMpeg.Extractor(track=1, preserve_delay=preserve_delay).extract_audio(sample_file_eac3_mkv)
+
+    assert out.container_delay == (13 if preserve_delay else 0)
 
 
 # Some of these tests randomly fail on some github runners and I'm not sure why.

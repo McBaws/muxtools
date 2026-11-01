@@ -171,7 +171,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
             args.append(str(out))
             duration = duration_from_file(input, self.track)
             if not run_cmd_pb(args, quiet, ProgressBarConfig("Extracting...", duration)):
-                return AudioFile(out, getattr(track, "delay_relative_to_video", 0) if self.preserve_delay else 0, input, None, duration)
+                return AudioFile(out, track.container_delay if self.preserve_delay else 0, input, None, duration)
             else:
                 raise error("Failed to extract audio track using ffmpeg", self)
 
@@ -354,8 +354,10 @@ class FFMpeg(HasExtractor, HasTrimmer):
                         if first:
                             if tr[0]:
                                 ms = tr[0] if self.trim_use_ms else self.resolved_ts.frame_to_time(tr[0], TimeType.EXACT, 3)
-                                cont_delay = self._calc_delay(ms, ainfo.num_samples(), track.raw_ffprobe.sample_rate or 48000)
-                                debug(f"Additional delay of {cont_delay} ms will be applied to fix remaining sync", self)
+                                trim_delay = self._calc_delay(ms, ainfo.num_samples(), track.raw_ffprobe.sample_rate or 48000)
+                                debug(f"Additional delay of {trim_delay} ms will be applied to fix remaining sync", self)
+                                # On top of the container delay that is already in there if it should be preserved
+                                cont_delay += trim_delay
                             first = False
                     else:
                         nArgs.extend(splitcommand(self._targs(tr)))
