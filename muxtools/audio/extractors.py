@@ -126,7 +126,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
             if not form:
                 lossy = False
                 extension = "wav"
-                danger("Unrecognized format: {track.format}\nWill extract as wav instead.", self)
+                danger(f"Unrecognized format: {track.codec_name}\nWill extract as wav instead.", self)
                 out = make_output(input, extension, f"extracted_{self.track}", self.output, temp=is_temp)
             else:
                 lossy = form.is_lossy

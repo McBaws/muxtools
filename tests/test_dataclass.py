@@ -21,3 +21,18 @@ def test_custom_args_updates(args_type: type[EmptyArgs] | type[ConfiguredArgs]) 
 
     assert args.get_custom_args_dict() == {"bitrate": 256, "encoder": "opus"}
     assert args.get_custom_args() == ["--bitrate", "256", "--encoder", "opus"]
+
+
+@pytest.mark.parametrize("affinity", [0.25, 0.5, 1.0, 2.0])
+def test_process_affinity_fraction(affinity: float) -> None:
+    from math import ceil
+    from os import cpu_count
+
+    @dataclass(config=allow_extra)
+    class AffinityArgs(CLIKwargs):
+        affinity: float = 1.0
+
+    threads = AffinityArgs(affinity=affinity).get_process_affinity()
+
+    assert isinstance(threads, list)
+    assert len(threads) == ceil((cpu_count() or 1) * min(affinity, 1.0))

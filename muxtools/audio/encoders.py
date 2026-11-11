@@ -174,7 +174,8 @@ class Opus(Encoder):
     Uses opusenc to encode audio to opus.
 
     :param bitrate:             Any int value representing kbps from 1 to 512
-                                Automatically chooses 192 and 320 for stereo and surround respectively if None
+                                Automatically chooses one based on the channels if None:
+                                128 for mono, 192 for stereo (or if downmixing), 320 for up to 6 channels and 420 for more
 
     :param vbr:                 Uses VBR encoding if True
     :param preprocess:          Any amount of preprocessors to run before passing it to the encoder.
@@ -197,9 +198,12 @@ class Opus(Encoder):
         if not bitrate:
             track_info = fileIn.get_trackinfo()
             channels = track_info.raw_ffprobe.channels or 2
+            preprocess = sanitize_pre(self.preprocess)
             match channels:
-                case _ if channels == 2 or [p for p in sanitize_pre(self.preprocess) if isinstance(p, Downmix)]:
+                case _ if channels == 2 or [p for p in preprocess if isinstance(p, Downmix) and p.can_run(track_info, preprocess)]:
                     bitrate = 192
+                case 1:
+                    bitrate = 128
                 case _ if channels > 6:
                     bitrate = 420
                 case _:

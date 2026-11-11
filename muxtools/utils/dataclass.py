@@ -105,7 +105,7 @@ class CLIKwargs(ABC):
             return []
 
         if isinstance(threads, float):
-            if 0.0 <= threads or threads >= 1.0:
+            if threads <= 0.0 or threads >= 1.0:
                 threads = 1.0
 
             threads = ceil(cpu_count() * threads)
