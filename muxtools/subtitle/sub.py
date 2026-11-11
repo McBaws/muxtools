@@ -971,7 +971,8 @@ class SubFile(BaseSubFile):
             raise error("The selected track is not an ASS or SRT subtitle.", caller)
 
         mkvextract = get_executable("mkvextract")
-        out = Path(get_workdir(), f"{file.stem}_{parsed_track.index}.{'ass' if parsed_track.codec_name == 'ass' else 'srt'}")
+        # Unique so that extracting the same track again doesn't overwrite the file of an existing SubFile
+        out = Path(uniquify_path(Path(get_workdir(), f"{file.stem}_{parsed_track.index}.{'ass' if parsed_track.codec_name == 'ass' else 'srt'}")))
         args = [mkvextract, str(file), "tracks", f"{parsed_track.index}:{str(out)}"]
         if run_commandline(args, quiet):
             raise error("Failed to extract subtitle!", caller)
