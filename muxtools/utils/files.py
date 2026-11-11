@@ -1,5 +1,6 @@
 import os
 import codecs
+from contextlib import nullcontext
 from typing import Any, Sequence
 from pathlib import Path
 from shutil import rmtree
@@ -116,25 +117,44 @@ def detect_encoding(file: Path, caller: Any = None) -> str:
         raise error(f"Couldn't detect the encoding of '{file.name}' as it isn't UTF-8. Please pass the encoding.", caller)
 
 
-def get_crc32(file: PathLike) -> str:
+def get_crc32(file: PathLike, show_progress: bool = True) -> str:
     """
     Generates crc32 checksum for file
 
-    :param file:        Input file
+    :param file:            Input file
+    :param show_progress:   Shows a progress bar while reading the file
 
-    :return:            Checksum for file
+    :return:                Checksum for file
     """
     try:
         from zlib import crc32
     except ImportError:
         from binascii import crc32
+    from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+
+    path = ensure_path(file, get_crc32)
+    progress_display = (
+        Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            transient=True,
+        )
+        if show_progress
+        else nullcontext()
+    )
 
     buffer_size = 1024 * 1024 * 32
     val = 0
-    with open(ensure_path(file, get_crc32), "rb") as f:
+    with open(path, "rb") as f, progress_display as progress:
+        task = progress.add_task("Generating CRC32...", total=path.stat().st_size) if progress else None
         buffer = f.read(buffer_size)
         while len(buffer) > 0:
             val = crc32(buffer, val)
+            if progress and task is not None:
+                progress.update(task, advance=len(buffer))
             buffer = f.read(buffer_size)
 
     val = val & 0xFFFFFFFF

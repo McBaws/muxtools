@@ -9,10 +9,11 @@ from mkvinfo import MKVInfo, Attachment as MKVAttachment
 
 from ..muxing.tracks import Attachment, AudioTrack, SubTrack, VideoTrack
 from ..utils.download import get_executable
-from ..utils.env import get_workdir, run_commandline
+from ..utils.env import get_workdir
 from ..utils.files import ensure_path, make_output, uniquify_path
 from ..utils.log import error
 from ..utils.probe import ParsedFile
+from ..utils.subprogress import run_mkvtoolnix_pb
 from ..utils.types import PathLike, TrackType
 
 __all__ = ["MKVExtract"]
@@ -81,7 +82,7 @@ class MKVExtract:
             raise ValueError("Extraction output cannot overwrite the source file.")
         existing = {path for path in paths if path.exists()}
         try:
-            code = run_commandline([self._executable, str(self._fileIn), *args], quiet, mkvmerge=True)
+            code = run_mkvtoolnix_pb([str(self._executable), str(self._fileIn), *args], "Extracting...", quiet)
             if code not in (0, 1) or any(not path.is_file() for path in paths):
                 raise error(f"Failed to extract from '{self._fileIn.name}'.", self)
             yield

@@ -226,7 +226,7 @@ def test_extraction_failure_cleans_partial_outputs(source: Path, tmp_path: Path,
         Path(args[-1].split(":", 1)[1]).write_bytes(b"partial output")
         return 2
 
-    monkeypatch.setattr(extract, "run_commandline", command)
+    monkeypatch.setattr(extract, "run_mkvtoolnix_pb", command)
     extractor = MKVExtract(source, output)
 
     with pytest.raises(LoggingException):
