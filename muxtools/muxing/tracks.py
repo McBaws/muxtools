@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from fractions import Fraction
 from shlex import split as split_args
+import re
 
 from ..utils.files import make_output, create_tags_xml
 from ..utils.glob import GlobSearch
@@ -12,7 +13,10 @@ from ..utils.download import get_executable
 from ..utils.language_util import standardize_tag
 from ..utils.dataclass import kwargs_to_cli_args
 from ..utils.log import error
-from .token_handling import apply_dynamic_tokens
+from .token_handling import TOKEN_REGEX, apply_dynamic_tokens
+
+if TYPE_CHECKING:
+    from mkvinfo import MKVInfo
 
 # fmt: off
 __all__ = [
@@ -25,17 +29,21 @@ __all__ = [
 # fmt: on
 
 
+CONTAINER_SUFFIXES = [".mkv", ".mka", ".mks", ".mk3d", ".webm", ".mp4", ".m4v", ".m4a", ".mov", ".m2ts", ".mts", ".ts", ".avi", ".ogm"]
 MKVMERGE_TYPES = {TrackType.VIDEO: "VIDEO", TrackType.AUDIO: "AUDIO", TrackType.SUB: "SUBTITLES"}
+TOKEN_TYPES = {TrackType.VIDEO: "v", TrackType.AUDIO: "a", TrackType.SUB: "s"}
 
 
-def _mkvmerge_track_ids(file: Path, type: TrackType) -> list[int]:
+def _mkvmerge_track_ids(file: Path, type: TrackType, info: "MKVInfo | None" = None) -> list[int]:
     """
     Returns the mkvmerge track IDs of all tracks of the given type in order.
     These can differ from the ffprobe indices, for example for TrueHD cores in m2ts files.
+
+    :param info:    Already parsed mkvmerge output of the file, if available.
     """
     from mkvinfo import MKVInfo
 
-    info = MKVInfo.from_file(file, mkvmerge=get_executable("mkvmerge"))
+    info = info or MKVInfo.from_file(file, mkvmerge=get_executable("mkvmerge"))
     return [track.id for track in info.tracks if track.type.name == MKVMERGE_TYPES[type]]
 
 
@@ -49,6 +57,8 @@ class _track:
     delay: int
     args: list[str]
     tags: dict[str, str] | None
+    track: int
+    _mkvinfo: "MKVInfo | None" = None
 
     def __init__(
         self,
@@ -61,6 +71,7 @@ class _track:
         delay: int | None = None,
         args: list[str] | None = None,
         tags: dict[str, str] | None = None,
+        track: int = 0,
         **kwargs: Any,
     ) -> None:
         """
@@ -72,8 +83,12 @@ class _track:
         :param forced:      Forced flag
         :param delay:       Container delay of track in ms.\n
                             If a file object is passed, its container delay is used unless a delay is passed explicitly (including 0).
-        :param args:        Custom parameters as a list of strings to be applied to the track.
+        :param args:        Custom parameters as a list of strings to be applied to the track.\n
+                            Track specific parameters should use the track ID 0, they are moved to the selected track automatically.
         :param tags:        Custom tags to be applied to the track. Defaults to the tags of a passed file object.
+        :param track:       Which track of this type to take from the file, counted within the type and starting at 0.\n
+                            Only this track is muxed. Chapters, attachments and tags of the file are skipped as well.
+                            Use Premux to take more from a file.
         :param kwargs:      Any other custom parameters to be added to the track.\n
                             This follows the same patterns as the [dynamic dataclasses](https://muxtools.vodes.pw/guide/dynamic-dataclasses/).
         """
@@ -92,8 +107,35 @@ class _track:
         self.type = type if isinstance(type, TrackType) else (TrackType(type) if isinstance(type, int) else TrackType[type.upper()])
         self.args = list(args) if args else []
         self.tags = tags
+        self.track = track
 
         self.args.extend(kwargs_to_cli_args(**kwargs))
+
+        # Containers can hold more than the wanted track, so only the selected one gets muxed
+        self._track_id = 0
+        self._selection_args: list[str] = []
+        if self.type in MKVMERGE_TYPES and (track != 0 or self.file.suffix.lower() in CONTAINER_SUFFIXES):
+            ids = _mkvmerge_track_ids(self.file, self.type, self._mkvinfo)
+            if track >= len(ids):
+                raise error(f"'{self.file.name}' does not have a {self.type.name.lower()} track {track}! ({len(ids)} found)", self)
+            self._track_id = ids[track]
+            selection = {
+                TrackType.VIDEO: ["--video-tracks", str(self._track_id), "--no-audio", "--no-subtitles"],
+                TrackType.AUDIO: ["--audio-tracks", str(self._track_id), "--no-video", "--no-subtitles"],
+                TrackType.SUB: ["--subtitle-tracks", str(self._track_id), "--no-video", "--no-audio"],
+            }
+            self._selection_args = [*selection[self.type], "--no-buttons", "--no-chapters", "--no-attachments"]
+
+    def _own_track_tokens(self, name: str) -> str:
+        """Makes tokens without a type or index refer to the selected track instead of the first track of the file."""
+
+        def replace(match: re.Match[str]) -> str:
+            if match.group("type") or match.group("num") is not None or match.group("lang"):
+                return match.group(0)
+            token = match.group(0)
+            return f"{token[0]}{TOKEN_TYPES[self.type]}{match.group('prop')}_{self.track}{token[-1]}"
+
+        return TOKEN_REGEX.sub(replace, name)
 
     def mkvmerge_args(self) -> list[str]:
         filepath = str(self.file.resolve())
@@ -115,28 +157,29 @@ class _track:
         elif self.type == TrackType.CHAPTERS:
             return ["--chapters", filepath]
 
-        name = apply_dynamic_tokens(self.name, self.file, False, self.lang if self.lang else None)
-        args = ["--no-global-tags", "--track-name", f"0:{name}"]
+        tid = self._track_id
+        name = apply_dynamic_tokens(self._own_track_tokens(self.name), self.file, False, self.lang if self.lang else None)
+        args = [*self._selection_args, "--no-global-tags", "--track-name", f"{tid}:{name}"]
 
         if self.tags and not all([not bool(v) for _, v in self.tags.items()]):
             tags_file = make_output(self.file, "xml", "_tags", temp=True)
             create_tags_xml(tags_file, self.tags)
-            args.extend(["--tags", f"0:{str(tags_file)}"])
+            args.extend(["--tags", f"{tid}:{str(tags_file)}"])
 
         if self.lang:
-            args.extend(["--language", f"0:{standardize_tag(self.lang)[1]}"])
+            args.extend(["--language", f"{tid}:{standardize_tag(self.lang)[1]}"])
         if self.delay:
-            args.extend(["--sync", f"0:{self.delay}"])
+            args.extend(["--sync", f"{tid}:{self.delay}"])
         args.extend(
             [
                 "--default-track-flag",
-                f"0:{'yes' if self.default else 'no'}",
+                f"{tid}:{'yes' if self.default else 'no'}",
                 "--forced-display-flag",
-                f"0:{'yes' if self.forced else 'no'}",
+                f"{tid}:{'yes' if self.forced else 'no'}",
             ]
         )
         if self.args:
-            args.extend(self.args)
+            args.extend([re.sub(r"^0:", f"{tid}:", arg) for arg in self.args] if tid else self.args)
         args.append(filepath)
         return args
 
@@ -164,6 +207,7 @@ class VideoTrack(_track):
         crop: int | tuple[int, int] | tuple[int, int, int, int] | None = None,
         args: list[str] | None = None,
         tags: dict[str, str] | None = None,
+        track: int = 0,
         **kwargs: Any,
     ) -> None:
         path = ensure_path(file, self)
@@ -182,18 +226,19 @@ class VideoTrack(_track):
         # Check for SAR in bitstream and get new display-width / height params for mkvmerge
         if "--display-dimensions" not in args and "display_dimensions" not in kwargs:
             parsed = ParsedFile.from_file(path, self, False)
-            video = parsed.find_tracks(type=TrackType.VIDEO, relative_id=0, caller=self)
+            self._mkvinfo = parsed.raw_mkvmerge
+            video = parsed.find_tracks(type=TrackType.VIDEO, relative_id=track, caller=self)
             if not video:
-                raise error(f"File '{path.name}' does not have a video track!", self)
+                raise error(f"File '{path.name}' does not have a video track {track}!", self)
             if not video[0].raw_ffprobe.width or not video[0].raw_ffprobe.height:
-                raise error(f"Video track 0 in file '{path.name}' does not have valid dimensions.", self)
+                raise error(f"Video track {track} in file '{path.name}' does not have valid dimensions.", self)
 
             if video[0].raw_ffprobe.sample_aspect_ratio:
                 if (sar_fraction := Fraction(str(video[0].raw_ffprobe.sample_aspect_ratio).replace(":", "/"))) != 1:
                     new_display_sizes = sar_fraction * video[0].raw_ffprobe.width / video[0].raw_ffprobe.height
                     kwargs.update(display_dimensions=f"0:{new_display_sizes.numerator}x{new_display_sizes.denominator}")
 
-        super().__init__(file, TrackType.VIDEO, name, lang, default, forced, delay, args, tags, **kwargs)
+        super().__init__(file, TrackType.VIDEO, name, lang, default, forced, delay, args, tags, track, **kwargs)
 
 
 class AudioTrack(_track):
@@ -213,9 +258,10 @@ class AudioTrack(_track):
         delay: int | None = None,
         args: list[str] | None = None,
         tags: dict[str, str] | None = None,
+        track: int = 0,
         **kwargs: Any,
     ) -> None:
-        super().__init__(file, TrackType.AUDIO, name, lang, default, forced, delay, args, tags, **kwargs)
+        super().__init__(file, TrackType.AUDIO, name, lang, default, forced, delay, args, tags, track, **kwargs)
 
 
 class Attachment(_track):
@@ -250,9 +296,10 @@ class SubTrack(_track):
         delay: int | None = None,
         args: list[str] | None = None,
         tags: dict[str, str] | None = None,
+        track: int = 0,
         **kwargs: Any,
     ) -> None:
-        super().__init__(file, TrackType.SUB, name, lang, default, forced, delay, args, tags, **kwargs)
+        super().__init__(file, TrackType.SUB, name, lang, default, forced, delay, args, tags, track, **kwargs)
 
 
 class Premux(_track):
