@@ -2,9 +2,10 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 from shutil import move
+from mkvinfo import MKVInfo
 
 from ..helper_util import replace_crc
-from ...utils import make_output, get_executable, run_commandline, clean_temp_files, error
+from ...utils import make_output, get_executable, run_commandline, clean_temp_files, error, warn
 
 __all__ = ["BSF_Matrix", "BSF_Transfer", "BSF_Primaries", "BSF_Format", "BSF_ChromaLocation"]
 
@@ -121,6 +122,36 @@ class BSF_Format(IntEnum):
     UNSPECIFIED = 5
 
 
+MATROSKA_EXTENSIONS = [".mkv", ".mka", ".mks", ".mk3d"]
+
+
+def _get_ietf_languages(file: Path) -> list[str | None] | None:
+    mkvmerge = get_executable("mkvmerge", can_error=False)
+    if not mkvmerge or file.suffix.lower() not in MATROSKA_EXTENSIONS:
+        return None
+    try:
+        return [track.properties.language_ietf for track in MKVInfo.from_file(file, mkvmerge=mkvmerge).tracks]
+    except Exception:
+        return None
+
+
+def _restore_ietf_languages(file: Path, languages: list[str | None] | None, caller: Any, quiet: bool = True) -> None:
+    """
+    ffmpeg only writes the legacy language element and turns something like `es-419` into `spa`.
+    """
+    new_languages = _get_ietf_languages(file)
+    if not languages or not new_languages or len(languages) != len(new_languages):
+        return
+
+    args = list[str]()
+    for i, (language, new_language) in enumerate(zip(languages, new_languages), start=1):
+        if language and language != new_language:
+            args.extend(["-e", f"track:{i}", "-s", f"language={language}"])
+
+    if args and run_commandline([get_executable("mkvpropedit"), str(file)] + args, quiet, mkvmerge=True) > 1:
+        warn(f"Failed to restore the track languages for '{file.name}'!", caller)
+
+
 def _apply_bsf(
     fileIn: Path,
     fileOut: Path | None,
@@ -138,6 +169,7 @@ def _apply_bsf(
 
     out = make_output(fileIn, fileIn.suffix[1:], suffix, fileOut, temp)
     ffmpeg = get_executable("ffmpeg")
+    languages = _get_ietf_languages(fileIn)
 
     options = ":".join(filter_options)
     args = [ffmpeg, "-hide_banner", "-i", str(fileIn), "-map", "0", "-c", "copy", "-bsf:v", f"{filter_name}={options}"]
@@ -154,4 +186,5 @@ def _apply_bsf(
         move(out, fileIn)
         clean_temp_files()
 
+    _restore_ietf_languages(out if custom_path else fileIn, languages, caller, quiet)
     return replace_crc(out if custom_path else fileIn, caller)

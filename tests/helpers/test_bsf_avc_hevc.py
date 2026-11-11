@@ -1,4 +1,4 @@
-from muxtools import ensure_path, Setup, get_workdir, ParsedFile
+from muxtools import ensure_path, Setup, get_workdir, ParsedFile, MKVPropEdit
 from muxtools.helpers.bsf import (
     BSF_Format,
     BSF_Matrix,
@@ -120,3 +120,14 @@ def test_crops():
     new = ParsedFile.from_file(f).tracks[0].raw_ffprobe
     assert new.width == 1916
     assert new.height == 1084  # AVC has internal mod16 padding
+
+
+@pytest.mark.parametrize("custom_output", [False, True])
+def test_bsf_keeps_ietf_languages(custom_output: bool):
+    f = get_workdir() / sample_file_h265.name
+    f, _ = MKVPropEdit(f).audio_track().audio_track(language="es-419").audio_track(language="pt-BR").run()
+
+    f = apply_hevc_bsf(f, get_workdir() / "custom.mkv" if custom_output else None, cloc_type=BSF_ChromaLocation.CENTER)
+
+    tracks = ParsedFile.from_file(f).tracks
+    assert [str(track.sanitized_lang) for track in tracks[2:4]] == ["es-419", "pt-BR"]
