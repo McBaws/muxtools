@@ -1,7 +1,4 @@
-from muxtools import ensure_path, Setup, get_workdir, GlobSearch
-
-
-from muxtools import ensure_path, Setup, get_workdir, get_executable, get_timemeta_from_video
+from muxtools import ensure_path, Setup, get_workdir, get_executable, get_timemeta_from_video, GlobSearch
 from muxtools.utils.env import communicate_stdout
 from time import sleep
 from shutil import rmtree
