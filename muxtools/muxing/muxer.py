@@ -8,7 +8,7 @@ import re
 
 from .tmdb import TmdbConfig
 from .muxfiles import MuxingFile
-from .token_handling import apply_dynamic_tokens, replace_with_temp_tokens
+from .token_handling import TOKEN_REGEX, apply_dynamic_tokens, replace_with_temp_tokens
 from ..utils.types import PathLike
 from ..subtitle.sub import FontFile
 from ..utils.glob import GlobSearch
@@ -16,14 +16,15 @@ from ..misc.chapters import Chapters
 from .tracks import Attachment, _track
 from ..utils.download import download_file, get_executable
 from ..utils.log import debug, error, info, warn, danger
-from ..utils.env import get_setup_attr, get_setup_dir, get_workdir, run_commandline
+from ..utils.env import get_setup_attr, get_setup_dir, get_workdir, get_temp_workdir, run_commandline
 from ..utils.files import ensure_path, ensure_path_exists, get_crc32, clean_temp_files
 from ..utils.probe import ParsedFile
 
 __all__ = ["mux"]
 
 
-writing_lib_regex = re.compile(r"libebml.v(\d.\d.\d).+?libmatroska.v(\d.\d.\d)", re.I)
+writing_lib_regex = re.compile(r"libebml\s*v(\d+(?:\.\d+)+).+?libmatroska\s*v(\d+(?:\.\d+)+)", re.I)
+statistics_writer_regex = re.compile(r"\s*<Simple>\s*<Name>_STATISTICS_WRITING_(?:APP|DATE_UTC)</Name>.*?</Simple>", re.S)
 
 
 def mux(
@@ -32,15 +33,23 @@ def mux(
     outfile: PathLike | None = None,
     quiet: bool = True,
     print_cli: bool = False,
+    anonymize: bool = False,
 ) -> Path:
     """
     Runs the mux.
 
-    :param *tracks:     Any amount of track objects and a Chapters object
+    :param *tracks:     Any amount of track objects, MuxingFiles and Chapters objects.\n
+                        Paths to txt or xml chapter files are also accepted and `None` values are skipped.
     :param tmdb:        A TMDB Config used for additional tagging if you so desire.
     :param outfile:     If you want to overwrite the output file path
     :param quiet:       Whether or not to print the mkvmerge output
     :param print_cli:   Print the final muxing command before running it if True
+    :param anonymize:   Removes identifying metadata from the muxed file: the muxing date, the muxing and writing application
+                        and the application/date entries of the track statistics tags. The statistics themselves are kept.\n
+                        This also skips the muxtools branding.
+                        Encoder information that is part of the streams themselves (like x264/x265 settings) is not touched.
+
+    :return:            Path to the muxed file
     """
     check_mkvmerge_version()
     tracklist = list(tracks)
@@ -87,7 +96,9 @@ def mux(
 
         raise error("Only _track, MuxingFiles or Chapters types are supported as muxing input!", "Mux")
 
-    if mkvtitle:
+    # Dynamic tokens can only be resolved from the muxed file, so such titles are set afterwards
+    title_has_tokens = bool(TOKEN_REGEX.search(mkvtitle))
+    if mkvtitle and not title_has_tokens:
         args.extend(["--title", mkvtitle])
 
     if print_cli:
@@ -97,36 +108,18 @@ def mux(
     if run_commandline(args, quiet, mkvmerge=True) > 1:
         raise error("Muxing failed!", "Mux")
 
-    if not get_setup_attr("skip_mux_branding", False):
-        try:
-            parsed = ParsedFile.from_file(outfile, "Mux")
-            tags = parsed.container_info.tags
-            if not tags:
-                debug("File does not contain writing library tags. Skipping the muxtools branding.", "Mux")
+    brand = not anonymize and not get_setup_attr("skip_mux_branding", False)
+    parsed = ParsedFile.from_file(outfile, "Mux") if brand or title_has_tokens or TOKEN_REGEX.search(outfile.name) else None
+    if parsed and title_has_tokens:
+        mkvtitle = apply_dynamic_tokens(mkvtitle, parsed, True, caller="Mux")
 
-            mkvpropedit = get_executable("mkvpropedit", can_error=False)
-            if not mkvpropedit:
-                warn("Mkvpropedit could not be found!", "Mux")
+    edit_file(outfile, parsed if brand else None, mkvtitle if title_has_tokens else None, anonymize)
 
-            from muxtools import __version__
-
-            version_tag = f" + muxtools v{__version__}"
-
-            muxing_application = tags.get("encoder", None)
-
-            if mkvpropedit and muxing_application and (match := writing_lib_regex.search(muxing_application)):
-                muxing_application = f"libebml v{match.group(1)} + libmatroska v{match.group(2)}" + version_tag
-                args = [mkvpropedit, "--edit", "info", "--set", f"muxing-application={muxing_application}", str(outfile.resolve())]
-                if run_commandline(args, mkvmerge=True) > 1:
-                    danger("Failed to add muxtools information via mkvpropedit!", "Mux")
-        except Exception as e:
-            print(e)
-            danger("Failed to add muxtools information via mkvpropedit!", "Mux")
-
-    new_name = apply_dynamic_tokens(outfile.name, outfile, True, caller="Mux")
+    new_name = apply_dynamic_tokens(outfile.name, parsed or outfile, True, caller="Mux")
     if outfile.name != new_name:
         outfile = outfile.replace(outfile.parent / new_name)
 
+    # This has to stay last because every change to the file changes the checksum
     if "#crc32#" in outfile.stem:
         debug("Generating CRC32 for the muxed file...", "Mux")
         outfile = outfile.replace(outfile.with_stem(outfile.stem.replace("#crc32#", get_crc32(outfile))))
@@ -138,6 +131,80 @@ def mux(
 
     debug("Done", "Mux")
     return outfile
+
+
+def edit_file(outfile: Path, parsed: ParsedFile | None, title: str | None, anonymize: bool) -> None:
+    """
+    Applies every post-mux change to the file in a single mkvpropedit run.
+
+    :param outfile:     The muxed file
+    :param parsed:      The parsed muxed file, used for the muxtools branding. None skips the branding.
+    :param title:       Title to set or None to leave it untouched
+    :param anonymize:   Whether to remove identifying metadata
+    """
+    info_args: list[str] = []
+    tag_args: list[str] = []
+
+    if title is not None:
+        info_args.extend(["--set", f"title={title}"])
+
+    if anonymize:
+        info_args.extend(["--delete", "date", "--set", "muxing-application=", "--set", "writing-application="])
+        if tags_file := statistics_tags_without_writer(outfile):
+            tag_args.extend(["--tags", f"all:{tags_file}"])
+    elif parsed:
+        info_args.extend(branding_args(parsed))
+
+    if not info_args and not tag_args:
+        return
+
+    mkvpropedit = get_executable("mkvpropedit", can_error=False)
+    if not mkvpropedit:
+        if title is not None or anonymize:
+            raise error("Mkvpropedit could not be found!", "Mux")
+        warn("Mkvpropedit could not be found!", "Mux")
+        return
+
+    args = [mkvpropedit, str(outfile.resolve()), *tag_args]
+    if info_args:
+        args.extend(["--edit", "info", *info_args])
+
+    if run_commandline(args, mkvmerge=True) > 1:
+        if title is not None or anonymize:
+            raise error("Failed to edit the muxed file via mkvpropedit!", "Mux")
+        danger("Failed to add muxtools information via mkvpropedit!", "Mux")
+
+
+def branding_args(parsed: ParsedFile) -> list[str]:
+    from muxtools import __version__
+
+    muxing_application = parsed.container_info.tags.get("encoder", None)
+    if not muxing_application or not (match := writing_lib_regex.search(muxing_application)):
+        debug("File does not contain writing library tags. Skipping the muxtools branding.", "Mux")
+        return []
+
+    muxing_application = f"libebml v{match.group(1)} + libmatroska v{match.group(2)} + muxtools v{__version__}"
+    return ["--set", f"muxing-application={muxing_application}"]
+
+
+def statistics_tags_without_writer(outfile: Path) -> Path | None:
+    """
+    Extracts all tags of the file and drops the application and date entries mkvmerge adds to the track statistics.
+
+    :return:    Path to the new tags file or None if the file has no tags
+    """
+    tags_file = Path(get_temp_workdir(), f"{outfile.stem}_tags.xml")
+    args = [get_executable("mkvextract"), str(outfile.resolve()), "tags", str(tags_file)]
+    if run_commandline(args, mkvmerge=True) > 1:
+        raise error("Failed to extract tags from the muxed file!", "Mux")
+
+    # mkvextract doesn't create a file at all if there are no tags
+    if not tags_file.exists():
+        return None
+
+    content = tags_file.read_text("utf-8")
+    tags_file.write_text(statistics_writer_regex.sub("", content), "utf-8")
+    return tags_file
 
 
 def clean_workdir(outfile: Path) -> None:
@@ -201,6 +268,9 @@ def output_names(
     filename = get_setup_attr("out_name", R"$show$ - $ep$ (premux)")
     title = get_setup_attr("mkv_title_naming", "")
 
+    if R"$crc32$" in title:
+        raise error("The CRC32 can't be part of the mkv title because the title changes the checksum.", "Mux")
+
     epint = 0
     try:
         ep_temp = str(episode)
@@ -240,6 +310,7 @@ def output_names(
             title = title.replace(token, "")
 
     filename = replace_with_temp_tokens(filename)
+    title = replace_with_temp_tokens(title)
 
     for attribute in get_setup_dir():
         attr = get_setup_attr(attribute, None)
