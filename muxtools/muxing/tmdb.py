@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import cast
 import logging
 
-from ..utils.log import debug, error, info
+from ..utils.log import debug, error, info, warn
 from ..utils.files import create_tags_xml
 
 
@@ -12,6 +12,8 @@ from ..utils.files import create_tags_xml
 # skill issue
 API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIxYTczNzMzMDE5NjFkMDNmOTdmODUzYTg3NmRkMTIxMiIsInN1YiI6IjU4NjRmNTkyYzNhMzY4MGFiNjAxNzUzNCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.gh1BwogCCKOda6xj9FRMgAAj_RYKMMPC3oNlcBtlmwk"
 BASE_URL = "https://api.themoviedb.org/3"
+HEADERS = {"accept": "application/json", "Authorization": f"Bearer {API_KEY}"}
+TIMEOUT = 60
 
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
 
@@ -70,20 +72,27 @@ class TmdbConfig:
     """
     A simple configuration class for TMDB Usage in muxing.
 
+    For episodes, the fetched title can be used in the `out_name` and `mkv_title_naming` templates of the Setup
+    with the `$title$` and `$title_sanitized$` placeholders. The sanitized version is the one that is safe to use in filenames.
+
     :param id:                  TMDB Media ID. The numerical part in URLs like https://www.themoviedb.org/tv/82684/...
     :param season:              The number of the season. If given an order this will be the Nth subgroup in that order.
     :param movie:               Is this a movie?
-    :param order:               Episode group/order enum or a string for an exact ID. Obviously not applicable to a movie.
+    :param order:               Episode group/order enum or a string for an exact ID. Obviously not applicable to a movie.\n
+                                If there are multiple groups of the given type, the one with the fewest subgroups is used.
     :param language:            The metadata language. Defaults to english.
-                                This requires ISO 639-1 codes. See https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
+                                This takes ISO 639-1 codes, optionally with a region like the default `en-US`.
+                                See https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
                                 Be aware that some metadata might just not exist in your requested language. Check beforehand.
 
-    :param offset:              Offset to apply to the current number used in the setup that will be matched to the TMDB number.
+    :param offset:              Offset to apply to the current number used in the setup that will be matched to the TMDB number.\n
+                                The resulting number has to be 1 or higher.
 
-    :param write_title:         Writes the episode title to the `DESCRIPTION` mkv tag if True
     :param write_ids:           Writes the IDs (IMDB, TVDB, TMDB) to their respective mkv tags if True
     :param write_date:          Writes the episode release date to the `DATE_RELEASED` mkv tag if True
+    :param write_title:         Writes the episode title to the `DESCRIPTION` mkv tag if True. Not applicable to movies.
     :param write_cover:         Download episode thumbnail from TMDB to use as cover art attachment for the MKV.
+                                Skipped with a warning if TMDB has no thumbnail for the episode.
     :param write_summary:       Writes the series summary/synopsis to the `SUMMARY` mkv tag if True
     :param write_synopsis:      Writes the individual episode synopsis to the `SYNOPSIS` mkv tag if True
     :param replace_spaces:      Replaces spaces in titles with dots if True and with whatever string you passed if a string.
@@ -109,67 +118,58 @@ class TmdbConfig:
     def needs_xml(self) -> bool:
         return self.write_ids or self.write_date or self.write_title or self.write_summary or self.write_synopsis
 
-    def get_media_meta(self) -> MediaMetadata:
+    def _request(self, url: str, name: str) -> dict:
         import niquests
 
-        url = f"{BASE_URL}/{'movie' if self.movie else 'tv'}/{self.id}?language={self.language}"
-        headers = {"accept": "application/json", "Authorization": f"Bearer {API_KEY}"}
-        response = niquests.get(url, headers=headers)
+        response = niquests.get(url, headers=HEADERS, timeout=TIMEOUT)
 
         if response.status_code is not None and response.status_code > 202:
-            ex = error(f"Media Metadata Request has failed! ({response.status_code})", self)
+            ex = error(f"{name} Request has failed! ({response.status_code})", self)
             debug(response.text or "")
             raise ex
 
-        mediajson = response.json()
+        return response.json()
 
-        url = f"{BASE_URL}/{'movie' if self.movie else 'tv'}/{self.id}/external_ids"
-        response = niquests.get(url, headers=headers)
-        other_ids = response.json()
+    def get_media_meta(self) -> MediaMetadata:
+        media_type = "movie" if self.movie else "tv"
+        mediajson = self._request(f"{BASE_URL}/{media_type}/{self.id}?language={self.language}", "Media Metadata")
+        other_ids = self._request(f"{BASE_URL}/{media_type}/{self.id}/external_ids", "External IDs")
 
+        # TMDB sends null for IDs it doesn't know
         return MediaMetadata(
             self.id,
-            other_ids.get("tvdb_id", 0),
-            other_ids.get("imdb_id", ""),
+            other_ids.get("tvdb_id") or 0,
+            other_ids.get("imdb_id") or "",
             mediajson.get("overview", ""),
             mediajson.get("release_date", None) if self.movie else None,
         )
 
+    def _order_id(self) -> str:
+        if isinstance(self.order, str):
+            return self.order
+
+        assert self.order
+        orders = self._request(f"{BASE_URL}/tv/{self.id}/episode_groups", "Episode Groups")["results"]
+        if not orders:
+            raise error("Could not find any episode groups/orders for this show.", self)
+        filtered = [order for order in orders if order["type"] == self.order]
+        if not filtered:
+            raise error(f"Could not find an episode groups/orders for type {self.order.name}.", self)
+
+        wanted_order = sorted(filtered, key=lambda it: it["group_count"])[0]
+        info(f"Selecting episode group '{wanted_order['name']}'.", self)
+        return str(wanted_order["id"])
+
     def get_episode_meta(self, num: int) -> EpisodeMetadata:
-        import niquests
-
-        if not hasattr(self, "episodes"):
-            headers = {"accept": "application/json", "Authorization": f"Bearer {API_KEY}"}
+        # Refetch if any of the values deciding which episodes we get changed since the last call
+        episodes_key = (self.id, self.season, self.order, self.language)
+        if getattr(self, "_episodes_key", None) != episodes_key:
             if self.order:
-                if not hasattr(self, "order_id"):
-                    if isinstance(self.order, str):
-                        setattr(self, "order_id", self.order)
-                    else:
-                        orders_url = f"{BASE_URL}/tv/{self.id}/episode_groups"
-                        order_resp = niquests.get(orders_url, headers=headers)
-                        orders = order_resp.json()["results"]
-                        if not orders:
-                            raise error("Could not find any episode groups/orders for this show.", self)
-                        filtered = [order for order in orders if order["type"] == self.order]
-                        if not filtered:
-                            raise error(f"Could not find an episode groups/orders for type {self.order.name}.", self)
-
-                        wanted_order = sorted(filtered, key=lambda it: it["group_count"])[0]
-                        info(f"Selecting episode group '{wanted_order['name']}'.", self)
-                        setattr(self, "order_id", str(wanted_order["id"]))
-
-                url = f"{BASE_URL}/tv/episode_group/{self.order_id}?language={self.language}"  # type: ignore[attr-defined]
+                url = f"{BASE_URL}/tv/episode_group/{self._order_id()}?language={self.language}"
             else:
                 url = f"{BASE_URL}/tv/{self.id}/season/{self.season}?language={self.language}"
 
-            meta_response = niquests.get(url, headers=headers)
-
-            if meta_response.status_code is not None and meta_response.status_code > 202:
-                ex = error(f"Episode Metadata Request has failed! ({meta_response.status_code})", self)
-                debug(meta_response.text or "")
-                raise ex
-
-            json_resp: dict = meta_response.json()
+            json_resp = self._request(url, "Episode Metadata")
             if "groups" in json_resp:
                 groups = json_resp["groups"]
                 try:
@@ -179,11 +179,24 @@ class TmdbConfig:
                 self.episodes = group["episodes"]
             else:
                 self.episodes = json_resp["episodes"]
+            self._episodes_key = episodes_key
+
+        # Negative indices would silently wrap around to the end of the season
+        index = num + self.offset
+        if index < 1:
+            raise error(f"Episode {num:02} with an offset of {self.offset} doesn't map to a TMDB episode number of 1 or higher!", self)
 
         try:
-            episode: dict = self.episodes[(num + self.offset) - 1]
+            episode: dict = self.episodes[index - 1]
         except:
             raise error(f"Failed to find or parse episode {num:02}!", self)
+
+        thumb_url = ""
+        if self.write_cover:
+            if still_path := episode.get("still_path"):
+                thumb_url = f"https://image.tmdb.org/t/p/w780{still_path}"
+            else:
+                warn(f"TMDB has no thumbnail for episode {num:02}. Skipping the cover.", self)
 
         title = cast(str, episode.get("name", ""))
         if self.replace_spaces is True:
@@ -201,7 +214,7 @@ class TmdbConfig:
             title,
             episode.get("air_date", ""),
             episode.get("overview", ""),
-            f"https://image.tmdb.org/t/p/w780{episode.get('still_path')}" if self.write_cover else "",
+            thumb_url,
             sanitized_title,
         )
 
@@ -217,7 +230,8 @@ class TmdbConfig:
                 tags.update(TVDB=str(media.tvdb_id))
             prefix = "movie/" if self.movie else "tv/"
             tags.update(TMDB=prefix + str(media.tmdb_id))
-            tags.update(IMDB=str(media.imdb_id))
+            if media.imdb_id:
+                tags.update(IMDB=media.imdb_id)
         if self.write_date:
             if self.movie:
                 if media.release_date:
@@ -239,16 +253,33 @@ def TitleTMDB(
     id: int, season: int = 1, movie: bool = False, language: str = "en-US", offset: int = 0, order: TMDBOrder | str | None = None
 ) -> TmdbConfig:
     """
-    Shortcut function to get a TMDB config with just titles enabled.
+    Shortcut function to get a TMDB config that only fetches episode titles.
+
+    The titles are only used for the `$title$` and `$title_sanitized$` placeholders in the Setup naming templates.
+    No mkv tags or cover are written. Since titles are fetched per episode, this does nothing for movies.
 
     :param id:              TMDB Media ID. The numerical part in URLs like https://www.themoviedb.org/tv/82684/...
     :param season:          The number of the season. If given an order this will be the Nth subgroup in that order.
     :param movie:           Is this a movie?
     :param order:           Episode group/order enum or a string for an exact ID. Obviously not applicable to a movie.
     :param language:        The metadata language. Defaults to english.
-                            This requires ISO 639-1 codes. See https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
+                            This takes ISO 639-1 codes, optionally with a region like the default `en-US`.
+                            See https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes
                             Be aware that some metadata might just not exist in your requested language. Check beforehand.
 
     :param offset:          Offset to apply to the current number used in the setup that will be matched to the TMDB number.
     """
-    return TmdbConfig(id, season, movie, order, language, offset, False, False, False, False, False, False)
+    return TmdbConfig(
+        id,
+        season,
+        movie,
+        order,
+        language,
+        offset,
+        write_ids=False,
+        write_date=False,
+        write_title=False,
+        write_cover=False,
+        write_summary=False,
+        write_synopsis=False,
+    )
