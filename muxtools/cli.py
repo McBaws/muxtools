@@ -186,8 +186,12 @@ def video_meta(input: Path, output: Path | None = None) -> None:
     if not parsed.is_video_file:
         raise ValueError(f"{path.name!r} is not a video file")
     destination = output or Path.cwd() / f"{path.stem}_meta.json"
+    previous = destination.stat().st_mtime_ns if destination.exists() else None
     get_timemeta_from_video(path, 0, destination, parsed, None)
-    _result("VideoMeta written:", destination)
+    if previous is not None and destination.exists() and destination.stat().st_mtime_ns == previous:
+        _result("VideoMeta already exists:", destination, kind="existing")
+    else:
+        _result("VideoMeta written:", destination)
 
 
 @binaries.command(

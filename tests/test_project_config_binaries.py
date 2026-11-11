@@ -213,6 +213,17 @@ def test_video_meta_default_output(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert received[0][2] == tmp_path / "episode_meta.json"
 
 
+def test_video_meta_existing_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    video = tmp_path / "episode.mkv"
+    video.write_bytes(b"video")
+    (tmp_path / "episode_meta.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.ParsedFile, "from_file", lambda *args: type("Video", (), {"is_video_file": True})())
+    monkeypatch.setattr(cli, "get_timemeta_from_video", lambda *args: None)
+    cli.video_meta(video)
+    assert capsys.readouterr().out.startswith("• VideoMeta already exists:")
+
+
 def test_runtime_respects_managed_and_system_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = init_config(tmp_path / "muxtools.toml")
     config = update_config(config.path, packages=["tool==weird-1"])

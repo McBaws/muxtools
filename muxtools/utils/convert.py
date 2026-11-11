@@ -74,7 +74,7 @@ def get_timemeta_from_video(
     Parse timestamps from an existing video file using ffprobe.\n
     They're saved as a custom meta file in the current workdir and named based on the input.
 
-    Also automatically reused (with a debug log) if already exists.
+    Also automatically reused (with a debug log) if already exists and was generated from the same file.
 
     :param video_file:      Input video. Path or String.
     :param index:           Relative video track index.
@@ -93,7 +93,15 @@ def get_timemeta_from_video(
         metadata = ParsedFile.from_file(video_file, caller, False)
 
     out_file = ensure_path(out_file, get_timemeta_from_video)
-    if not out_file.exists() or out_file.stat().st_size < 1:
+    existing = None
+    if out_file.exists() and out_file.stat().st_size > 0:
+        existing = VideoMeta.from_json(out_file)
+        # The default file name only depends on the stem so a different video can have the same one
+        if Path(existing.source) != video_file.resolve():
+            debug(f"Existing timestamps in '{out_file.name}' are from a different file.", caller)
+            existing = None
+
+    if not existing:
         info(f"Generating timestamps for track {index} in '{video_file.name}'...", caller)
         video_tracks = metadata.find_tracks(type=TrackType.VIDEO, relative_id=index, error_if_empty=True, caller=caller or get_timemeta_from_video)
         timestamps = VideoTimestamps.from_video_file(video_file, video_tracks[0].index)
@@ -101,7 +109,7 @@ def get_timemeta_from_video(
         with open(out_file, "w", encoding="utf-8") as f:
             f.write(meta.to_json())
     else:
-        meta = VideoMeta.from_json(out_file)
+        meta = existing
         debug(f"Reusing existing timestamps for '{video_file.name}'", caller)
     return meta
 
