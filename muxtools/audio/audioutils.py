@@ -101,7 +101,7 @@ def get_preprocess_args(
     if any([p.can_run(track_info, preprocessors) for p in preprocessors]):
         filters = list[str]()
         for pre in [p for p in preprocessors if p.can_run(track_info, preprocessors)]:
-            pre.analyze(fileIn)
+            pre.analyze(fileIn, filters)
             args.extend(pre.get_args(caller=caller))
             filt = pre.get_filter(caller=caller)
             if filt:
@@ -127,7 +127,7 @@ def get_pcm(
     for pre in preprocess:
         can_run = pre.can_run(track_info, preprocess)
         if can_run:
-            pre.analyze(fileIn)
+            pre.analyze(fileIn, filters)
             args.extend(pre.get_args(caller=caller))
             filt = pre.get_filter(caller=caller)
             if filt:
