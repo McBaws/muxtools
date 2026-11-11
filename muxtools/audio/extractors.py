@@ -208,12 +208,12 @@ class FFMpeg(HasExtractor, HasTrimmer):
             flac_returncode = run_commandline(args_flac, quiet, stdin=ffmpeg_process.stdout)
             if flac_returncode:
                 danger("Failed to encode temp file via flac for analysis!", self)
-                clean_temp_files()
+                temp_out.unlink(missing_ok=True)
                 return 0
             returncode, stdout = communicate_stdout([flac, "-sac", str(temp_out)])
             if returncode:
                 danger("Failed to analyse the temporary flac file!", self)
-                clean_temp_files()
+                temp_out.unlink(missing_ok=True)
                 return 0
 
             total = 0
@@ -235,7 +235,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
             else:
                 danger("Audio analysis resulted in no valid bit depth entries!", self)
 
-            clean_temp_files()
+            temp_out.unlink(missing_ok=True)
             return average_bits
 
     @dataclass
