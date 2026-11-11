@@ -44,7 +44,9 @@ class qALAC(Encoder):
         if not isinstance(fileIn, AudioFile):
             fileIn = AudioFile.from_file(fileIn, self)
         output = make_output(fileIn.file, "alac", "qaac", self.output)
-        source = ensure_valid_in(fileIn, preprocess=self.preprocess, caller=self, valid_type=ValidInputType.RF64, supports_pipe=True)
+        source = ensure_valid_in(
+            fileIn, preprocess=self.preprocess, caller=self, valid_type=ValidInputType.RF64, supports_pipe=True, allow_float=False
+        )
         qaac = get_executable("qaac")
         ver = qaac_compatcheck()
         tags = dict[str, str](ENCODER=f"qaac {ver}")
@@ -178,7 +180,7 @@ class LossyWav(Encoder):
         if not isinstance(fileIn, AudioFile):
             fileIn = AudioFile.from_file(fileIn, self)
 
-        output = ensure_valid_in(fileIn, False, self.preprocess, valid_type=ValidInputType.W64, caller=self)
+        output = ensure_valid_in(fileIn, False, self.preprocess, valid_type=ValidInputType.W64, caller=self, allow_float=False)
 
         args = [
             get_executable("lossyWAV"),

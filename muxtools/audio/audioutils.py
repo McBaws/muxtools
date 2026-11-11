@@ -32,6 +32,7 @@ def ensure_valid_in(
     preprocess: Preprocessor | Sequence[Preprocessor] | None = None,
     valid_type: ValidInputType = ValidInputType.FLAC,
     caller: Any = None,
+    allow_float: bool = True,
 ) -> AudioFile | subprocess.Popen: ...
 
 
@@ -42,6 +43,7 @@ def ensure_valid_in(
     preprocess: Preprocessor | Sequence[Preprocessor] | None = None,
     valid_type: ValidInputType = ValidInputType.FLAC,
     caller: Any = None,
+    allow_float: bool = True,
 ) -> AudioFile: ...
 
 
@@ -51,10 +53,13 @@ def ensure_valid_in(
     preprocess: Preprocessor | Sequence[Preprocessor] | None = None,
     valid_type: ValidInputType = ValidInputType.FLAC,
     caller: Any = None,
+    allow_float: bool = True,
 ) -> AudioFile | subprocess.Popen:
     """
     Ensures valid input for any encoder that accepts flac (all of them).
     Passes existing file if no need to dither and is either wav or flac.
+
+    :param allow_float:     Whether the encoder can take floating point PCM. Float input is converted to 24 bit if not.
     """
     if fileIn.has_multiple_tracks(caller):
         msg = f"'{fileIn.file.name}' is a container with multiple tracks.\n"
@@ -73,7 +78,7 @@ def ensure_valid_in(
 
     wont_process = not any([p.can_run(trackinfo, preprocess) for p in preprocess])
 
-    if (form == AudioFormat.PCM and container.format_name.lower() == "wav") and wont_process:
+    if (form == AudioFormat.PCM and container.format_name.lower() == "wav") and wont_process and (allow_float or not is_float(trackinfo)):
         return fileIn
     if valid_type.allows_flac():
         valid_type = valid_type.remove_flac()
@@ -90,7 +95,24 @@ def ensure_valid_in(
                 fileIn, temp=True
             )
     else:
-        return get_pcm(fileIn, trackinfo, supports_pipe, preprocess, valid_type, caller)
+        return get_pcm(fileIn, trackinfo, supports_pipe, preprocess, valid_type, caller, allow_float)
+
+
+def is_float(track_info: TrackInfo) -> bool:
+    return (track_info.raw_ffprobe.sample_fmt or "").lower().removesuffix("p") in ["flt", "dbl"]
+
+
+def get_pcm_codec(track_info: TrackInfo, allow_float: bool = True) -> str:
+    """
+    Returns the little endian PCM codec that can hold the samples of the track without losing precision.
+    """
+    if is_float(track_info):
+        if not allow_float:
+            # 32 bit float has 24 bits of precision
+            return "pcm_s24le"
+        return "pcm_f64le" if (track_info.raw_ffprobe.sample_fmt or "").lower().startswith("dbl") else "pcm_f32le"
+    depth = track_info.bit_depth or 16
+    return "pcm_s16le" if depth <= 16 else "pcm_s24le" if depth <= 24 else "pcm_s32le"
 
 
 def get_preprocess_args(
@@ -118,10 +140,11 @@ def get_pcm(
     preprocess: Sequence[Preprocessor] | None = None,
     valid_type: ValidInputType = ValidInputType.RF64,
     caller: Any = None,
+    allow_float: bool = True,
 ) -> AudioFile | subprocess.Popen:
     ffmpeg = get_executable("ffmpeg")
     args = [ffmpeg, "-i", str(fileIn.file), "-map", "0:a:0"]
-    codec = "pcm_s16le" if (track_info.bit_depth or 16) == 16 else "pcm_s24le"
+    codec = get_pcm_codec(track_info, allow_float)
     filters = list[str]()
     preprocess = sanitize_pre(preprocess)
     for pre in preprocess:
@@ -132,8 +155,8 @@ def get_pcm(
             filt = pre.get_filter(caller=caller)
             if filt:
                 filters.append(filt)
-        if isinstance(pre, Resample):
-            codec = "pcm_s16le" if can_run and (pre.depth or (track_info.bit_depth or 16)) == 16 else "pcm_s24le"
+        if isinstance(pre, Resample) and can_run and pre.depth:
+            codec = "pcm_s16le" if pre.depth == 16 else "pcm_s24le"
     if filters:
         args.extend(["-filter:a", ",".join(filters)])
     args.extend(["-c:a", codec])

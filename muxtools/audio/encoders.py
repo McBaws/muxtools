@@ -45,7 +45,9 @@ class FLAC(LosslessEncoder):
         flac = get_executable("flac")
         version = get_binary_version(flac, r"flac .+? version (\d\.\d+\.\d+)")
         output = make_output(fileIn.file, "flac", "libflac", self.output)
-        source = ensure_valid_in(fileIn, preprocess=self.preprocess, caller=self, valid_type=ValidInputType.W64_OR_FLAC, supports_pipe=False)
+        source = ensure_valid_in(
+            fileIn, preprocess=self.preprocess, caller=self, valid_type=ValidInputType.W64_OR_FLAC, supports_pipe=False, allow_float=False
+        )
         info(f"Encoding '{fileIn.file.stem}' to FLAC using libFLAC...", self)
 
         args = [flac, f"-{self.compression_level}", "-o", str(output)] + self.get_custom_args()
