@@ -119,3 +119,39 @@ def test_from_sub_markers_are_case_insensitive(tmp_path) -> None:
 def test_from_mkv_without_chapters() -> None:
     with pytest.raises(LoggingException, match="does not contain any chapters"):
         Chapters.from_mkv(test_dir / "test-data" / "sample-files" / "H264-MP3-Vorbis-sample.mkv", _print=False)
+
+
+def frames(ch: Chapters) -> list[tuple[int, str | None]]:
+    return [(ch._frame(time), name) for time, name in ch.chapters]
+
+
+@pytest.mark.parametrize(
+    "trim, expected",
+    [
+        # The chapter playing at the cut point moves to the start
+        ((50,), [(0, "Prologue"), (50, "OP"), (450, "A")]),
+        ((100,), [(0, "OP"), (400, "A")]),
+        ((150,), [(0, "OP"), (350, "A")]),
+        # The end is a frame number of the untrimmed source
+        ((100, 500), [(0, "OP")]),
+        ((0, 501), [(0, "Prologue"), (100, "OP"), (500, "A")]),
+        # The length of the trimmed clip bounds the end as well
+        ((100, -50, 400), [(0, "OP")]),
+        ((100, 0, 401), [(0, "OP"), (400, "A")]),
+    ],
+)
+def test_trim(trim: tuple[int, ...], expected: list[tuple[int, str]]) -> None:
+    ch = Chapters([(0, "Prologue"), (500, "A"), (100, "OP")], Fraction(24000, 1001), _print=False)
+
+    assert frames(ch.trim(*trim)) == expected
+
+
+def test_trim_negative_end_needs_num_frames() -> None:
+    with pytest.raises(LoggingException):
+        Chapters([(0, "A")], _print=False).trim(24, -24)
+
+
+def test_trim_keeps_exact_times() -> None:
+    times = [(timedelta(milliseconds=1234), "A"), (timedelta(milliseconds=5678), "B")]
+
+    assert Chapters(list(times), _print=False).trim(0).chapters == times

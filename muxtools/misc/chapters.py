@@ -4,7 +4,7 @@ from datetime import timedelta
 from fractions import Fraction
 from pathlib import Path
 from typing import TypeVar, cast
-from video_timestamps import TimeType, ABCTimestamps
+from video_timestamps import TimeType, ABCTimestamps, FPSTimestamps
 import re
 
 from ..subtitle.sub import SubFile
@@ -63,35 +63,52 @@ class Chapters:
         if _print and isinstance(chapter_source, Path):
             self.print()
 
-    def trim(self: ChaptersSelf, trim_start: int = 0, trim_end: int = 0, num_frames: int = 0) -> ChaptersSelf:
-        """
-        Trims the chapters
-        """
-        if trim_start > 0:
-            chapters: list[Chapter] = []
-            for time_value, name in self.chapters:
-                if timedelta_to_frame(self.timestamps, time_value, TimeType.START) == 0:
-                    chapters.append((time_value, name))
-                    continue
-                if timedelta_to_frame(self.timestamps, time_value, TimeType.START) - trim_start < 0:
-                    continue
-                trim_start_ms = self.timestamps.frame_to_time(trim_start, TimeType.START, 3)
-                time_value = time_value - timedelta(milliseconds=trim_start_ms)
-                if num_frames:
-                    last_frame_ms = self.timestamps.frame_to_time(num_frames - 1, TimeType.START, 3)
-                    if time_value > timedelta(milliseconds=last_frame_ms):
-                        continue
-                chapters.append((time_value, name))
+    def _frame(self, time: timedelta) -> int:
+        return timedelta_to_frame(self.timestamps, time, TimeType.START)
 
-            self.chapters = chapters
-        if trim_end is not None and trim_end != 0:
-            if trim_end > 0:
-                chapters: list[Chapter] = []  # type: ignore[no-redef]
-                for chapter in self.chapters:
-                    if timedelta_to_frame(self.timestamps, chapter[0], TimeType.START) < trim_end:
-                        chapters.append(chapter)
-                self.chapters = chapters
+    def trim(self: ChaptersSelf, trim_start: int = 0, trim_end: int | None = 0, num_frames: int = 0) -> ChaptersSelf:
+        """
+        Trims the chapters the same way the video and audio are trimmed, keeping the frames from `trim_start` up to `trim_end`.\n
+        Both are frame numbers of the untrimmed source, like `clip[trim_start:trim_end]` in VapourSynth.
 
+        The chapter that is playing at `trim_start` is moved to the start, every chapter before it is dropped.
+
+        :param trim_start:  First frame to keep.
+        :param trim_end:    Frame to stop before. `0` or `None` keeps everything after `trim_start`.\n
+                            Negative values count back from the end of the source.
+                            Because the length of the source isn't known here, this requires `num_frames`.
+        :param num_frames:  Number of frames of the trimmed clip. Chapters that would start at or after its end are dropped.
+        """
+        trim_start = max(trim_start, 0)
+        trim_end = trim_end or None
+        if trim_end is not None and trim_end < 0:
+            if not num_frames:
+                raise error("A negative trim_end requires num_frames to be passed!", self)
+            # The end of the trimmed clip is already given by num_frames
+            trim_end = None
+
+        start_ms = self.timestamps.frame_to_time(trim_start, TimeType.START, 3)
+        chapters: list[Chapter] = []
+        for time_value, name in sorted(self.chapters, key=lambda chapter: chapter[0]):
+            frame = self._frame(time_value)
+            if trim_end is not None and frame >= trim_end:
+                continue
+
+            new_frame = max(frame - trim_start, 0)
+            if num_frames and new_frame >= num_frames:
+                continue
+
+            # Only the last chapter at or before trim_start stays, as it is the one playing when the trimmed clip starts
+            if new_frame == 0 and chapters and chapters[-1][0] == timedelta(0):
+                chapters.pop()
+
+            time_value = max(time_value - timedelta(milliseconds=start_ms), timedelta(0))
+            # Subtracting two millisecond values that were rounded on their own can land on the next frame
+            if isinstance(self.timestamps, FPSTimestamps) and self._frame(time_value) != new_frame:
+                time_value = timedelta(milliseconds=self.timestamps.frame_to_time(new_frame, TimeType.START, 3))
+            chapters.append((time_value, name))
+
+        self.chapters = chapters
         return self
 
     def set_names(self: ChaptersSelf, names: list[str | None]) -> ChaptersSelf:
