@@ -66,8 +66,7 @@ def test_shift_by_24() -> None:
         presumed = cast(_Line, presumed)
         correct = cast(_Line, correct)
 
-        _compare_times(presumed.start, correct.start, resolved, TimeType.START)
-        _compare_times(presumed.end, correct.end, resolved, TimeType.END)
+        assert (presumed.start, presumed.end) == (correct.start, correct.end), _line_yap(presumed)
 
 
 def test_shift_by_7200() -> None:
@@ -90,8 +89,7 @@ def test_shift_by_7200() -> None:
         presumed = cast(_Line, presumed)
         correct = cast(_Line, correct)
 
-        _compare_times(presumed.start, correct.start, resolved, TimeType.START)
-        _compare_times(presumed.end, correct.end, resolved, TimeType.END)
+        assert (presumed.start, presumed.end) == (correct.start, correct.end), _line_yap(presumed)
 
 
 def test_shift_to_frame_zero() -> None:
@@ -213,3 +211,61 @@ def test_shift_keeps_frame_with_float_imprecise_time() -> None:
     # So the line is on frames 6141 to 6146 and has to stay in those frame windows.
     assert timedelta(milliseconds=256089) < line.start <= timedelta(milliseconds=256131), _line_yap(line)
     assert timedelta(milliseconds=256339) < line.end <= timedelta(milliseconds=256381), _line_yap(line)
+
+
+def test_shift_0() -> None:
+    """
+    shift_0 should snap the lines of the allowed styles to the frame grid and leave the others alone.
+    """
+    from fractions import Fraction
+
+    resolved = resolve_timesource_and_scale(Fraction(24000, 1001))
+    path = _write_sub(get_workdir() / "shift_0.ass", [(timedelta(seconds=1), timedelta(milliseconds=2990), "off grid")])
+    sub = SubFile(path)
+
+    sub.shift_0(resolved, allowed_styles=["Sign"])
+    line = cast(_Line, sub._read_doc().events[0])
+    assert (line.start, line.end) == (timedelta(seconds=1), timedelta(milliseconds=2990)), _line_yap(line)
+
+    sub.shift_0(resolved)
+    line = cast(_Line, sub._read_doc().events[0])
+    # Starts on frame 24 and ends on frame 71, both centered between their frame and the neighbouring one
+    assert (line.start, line.end) == (timedelta(milliseconds=980), timedelta(milliseconds=2980)), _line_yap(line)
+
+
+@pytest.mark.parametrize(
+    "first_timestamps, end_ms",
+    [
+        ("42/1000", 30),
+        # 49.5ms gets rounded to 50ms by the time scale, so a line ending at 50ms ends exactly on the first frame
+        ("99/2000", 50),
+    ],
+)
+def test_shift_line_ending_before_first_frame(first_timestamps: str, end_ms: int) -> None:
+    """
+    A line that ends before the first frame of a video that doesn't start at 0 should become zero length instead of erroring.
+    """
+    from fractions import Fraction
+    from video_timestamps import FPSTimestamps, RoundingMethod
+
+    timestamps = FPSTimestamps(RoundingMethod.ROUND, Fraction(1000), Fraction(24000, 1001), first_timestamps=Fraction(first_timestamps))
+    path = _write_sub(get_workdir() / "shift_first_frame.ass", [(timedelta(0), timedelta(milliseconds=end_ms), "before first frame")])
+
+    sub = SubFile(path)
+    sub.shift(0, timestamps)
+    line = cast(_Line, sub._read_doc().events[0])
+    assert line.start == line.end, _line_yap(line)
+
+
+def test_from_srt_timing(tmp_path: Path) -> None:
+    """
+    SRT times are snapped to frames and converted back the same way aegisub does it.
+    """
+    srt = tmp_path / "ep.srt"
+    srt.write_text("1\n00:00:00,375 --> 00:00:01,000\ntext\n\n", encoding="utf-8")
+    line = cast(_Line, SubFile.from_srt(srt)._read_doc().events[0])
+
+    # Frame n is shown at round(n * 1001 / 24) ms: 8 at 334, 9 at 375, 23 at 959 and 24 at 1001.
+    # The line is on frames 9 to 23. Aegisub puts the start halfway between frames 8 and 9: 334 + (375 - 334 + 1) // 2 = 355
+    # and the end halfway between frames 23 and 24: 959 + (1001 - 959 + 1) // 2 = 980. Both are then rounded to centiseconds.
+    assert (line.start, line.end) == (timedelta(milliseconds=360), timedelta(milliseconds=980)), _line_yap(line)

@@ -5,6 +5,7 @@ from typing import Any, NamedTuple
 from collections.abc import Callable, Sequence
 from enum import IntEnum, Enum
 from copy import deepcopy
+from fractions import Fraction
 
 from video_timestamps import ABCTimestamps, TimeType
 
@@ -61,6 +62,21 @@ class _Line:
     """A legacy effect to be applied to the event. Can usually also be used as another freeform field."""
     text: str
     """The text displayed (or not, if this is a Comment)"""
+
+
+def _frame_to_aegisub_time(timestamps: ABCTimestamps, frame: int, time_type: TimeType) -> timedelta:
+    """
+    Same as Aegisub's TimeAtFrame: halfway between the frame and the previous (START) or next (END) one, rounded up.
+    The result is then rounded to centiseconds with 5ms going up, like Aegisub does when saving.
+    """
+    if time_type == TimeType.START and frame == 0:
+        # Aegisub clamps the negative time it gets for this to 0
+        return timedelta(0)
+    first = frame - 1 if time_type == TimeType.START else frame
+    first_ms = timestamps.frame_to_time(first, TimeType.EXACT, 3)
+    second_ms = timestamps.frame_to_time(first + 1, TimeType.EXACT, 3)
+    ms = first_ms + (second_ms - first_ms + 1) // 2
+    return timedelta(milliseconds=(ms + 5) - (ms + 5) % 10)
 
 
 class ShiftResult(NamedTuple):
@@ -256,7 +272,8 @@ class BaseSubFile(ABC, MuxingFile):
 
         # Whole milliseconds without going through a float, see timedelta_to_frame
         end_ms = line.end // timedelta(milliseconds=1)
-        zero_length = end_ms <= timestamps.frame_to_time(0, TimeType.EXACT, 3)
+        # Same check time_to_frame does, first_timestamps itself isn't rounded to the time scale
+        zero_length = Fraction(end_ms, 1000) <= timestamps.frame_to_time(0, TimeType.EXACT)
         if zero_length:
             end_frame = start_frame
         else:
@@ -286,16 +303,9 @@ class BaseSubFile(ABC, MuxingFile):
                     new_end_frame = 0
                     zero_length = True
 
-        start = timestamps.frame_to_time(new_start_frame, TimeType.START, 2, True)
-
-        if zero_length:
-            end = timestamps.frame_to_time(new_end_frame, TimeType.START, 2, True)
-        else:
-            end = timestamps.frame_to_time(new_end_frame, TimeType.END, 2, True)
-
         new_line = deepcopy(line)
-        new_line.start = timedelta(milliseconds=start * 10)
-        new_line.end = timedelta(milliseconds=end * 10)
+        new_line.start = _frame_to_aegisub_time(timestamps, new_start_frame, TimeType.START)
+        new_line.end = _frame_to_aegisub_time(timestamps, new_end_frame, TimeType.START if zero_length else TimeType.END)
         return ShiftResult(new_line, outofbounds)
 
     def _set_header(self, header: str | ASSHeader, value: str | int | bool | None, opened_doc: None | Document = None) -> None:

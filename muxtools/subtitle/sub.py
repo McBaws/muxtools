@@ -23,7 +23,7 @@ from ..utils.files import ensure_path_exists, make_output, clean_temp_files, uni
 from ..utils.probe import ParsedFile
 from ..muxing.muxfiles import MuxingFile
 from ..muxing.tracks import Attachment
-from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode
+from .basesub import BaseSubFile, _Line, ASSHeader, ShiftMode, OutOfBoundsMode, _frame_to_aegisub_time
 
 __all__ = ["FontFile", "SubFile", "DEFAULT_DIALOGUE_STYLES"]
 
@@ -417,9 +417,7 @@ class SubFile(BaseSubFile):
     ) -> Self:
         """
         Does the famous shift by 0 frames to fix frame timing issues.
-        (It's basically just converting time to frame and back)
-
-        This does not currently exactly reproduce the aegisub behaviour but it should have the same effect.
+        (It's basically just converting time to frame and back, the same way aegisub does)
 
         :param timesource:      The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
@@ -432,8 +430,9 @@ class SubFile(BaseSubFile):
         def _func(lines: LINES):
             for line in lines:
                 if not allowed_styles or line.style.casefold() in {style.casefold() for style in allowed_styles}:
-                    result = self._shift_line_by_frames(line, 0, resolved_ts, OutOfBoundsMode.ERROR)
-                    line = result.line
+                    shifted = self._shift_line_by_frames(line, 0, resolved_ts, OutOfBoundsMode.ERROR).line
+                    line.start = shifted.start
+                    line.end = shifted.end
 
         return self.manipulate_lines(_func)
 
@@ -900,8 +899,7 @@ class SubFile(BaseSubFile):
             args = timestamp.split(",")[0].split(":")
             parsed = timedelta(hours=int(args[0]), minutes=int(args[1]), seconds=int(args[2]), milliseconds=int(timestamp.split(",")[1]))
             cope = timedelta_to_frame(resolved_ts, parsed, time_type)
-            cope = resolved_ts.frame_to_time(cope, time_type, 3, True)
-            return timedelta(milliseconds=cope)
+            return _frame_to_aegisub_time(resolved_ts, cope, time_type)
 
         def convert_tags(text: str) -> tuple[str, bool]:
             text = text.strip().replace("\n", "\\N")
