@@ -2,8 +2,10 @@ from muxtools import Setup, get_workdir, ensure_path, Chapters, get_executable, 
 from shutil import rmtree
 from time import sleep
 from datetime import timedelta
+from fractions import Fraction
 from typing import cast
 from muxtools.utils.types import LooseChapter
+from muxtools.utils.log import LoggingException
 import pytest
 
 test_dir = ensure_path(__file__, None).parent
@@ -80,3 +82,39 @@ def test_unicode_chapters_with_legacy_charset():
     extracted = get_workdir() / "extracted-chapters.txt"
     assert run_commandline([get_executable("mkvextract"), str(out), "chapters", "-s", str(extracted)]) == 0
     assert Chapters(extracted, _print=False).chapters == ch.chapters
+
+
+def frames(ch: Chapters) -> list[tuple[int, str | None]]:
+    return [(ch._frame(time), name) for time, name in ch.chapters]
+
+
+@pytest.mark.parametrize(
+    "trim, expected",
+    [
+        # The chapter playing at the cut point moves to the start
+        ((50,), [(0, "Prologue"), (50, "OP"), (450, "A")]),
+        ((100,), [(0, "OP"), (400, "A")]),
+        ((150,), [(0, "OP"), (350, "A")]),
+        # The end is a frame number of the untrimmed source
+        ((100, 500), [(0, "OP")]),
+        ((0, 501), [(0, "Prologue"), (100, "OP"), (500, "A")]),
+        # The length of the trimmed clip bounds the end as well
+        ((100, -50, 400), [(0, "OP")]),
+        ((100, 0, 401), [(0, "OP"), (400, "A")]),
+    ],
+)
+def test_trim(trim: tuple[int, ...], expected: list[tuple[int, str]]) -> None:
+    ch = Chapters([(0, "Prologue"), (500, "A"), (100, "OP")], Fraction(24000, 1001), _print=False)
+
+    assert frames(ch.trim(*trim)) == expected
+
+
+def test_trim_negative_end_needs_num_frames() -> None:
+    with pytest.raises(LoggingException):
+        Chapters([(0, "A")], _print=False).trim(24, -24)
+
+
+def test_trim_keeps_exact_times() -> None:
+    times = [(timedelta(milliseconds=1234), "A"), (timedelta(milliseconds=5678), "B")]
+
+    assert Chapters(list(times), _print=False).trim(0).chapters == times
