@@ -1,10 +1,11 @@
 import os
+import codecs
 from typing import Any, Sequence
 from pathlib import Path
 from shutil import rmtree
 import xml.etree.ElementTree as ET
 
-from .log import crit, warn
+from .log import crit, error, warn
 from .glob import GlobSearch
 from .types import PathLike, FileMixin
 from .env import get_temp_workdir, get_workdir
@@ -85,6 +86,34 @@ def uniquify_path(path: PathLike, *, reserved: Sequence[PathLike] = (), companio
 
         path = filename + " (" + str(counter) + ")" + extension
         counter += 1
+
+
+def detect_encoding(file: Path, caller: Any = None) -> str:
+    """
+    Detects the encoding of a text file: UTF-16/32 by their byte order mark, otherwise UTF-8 with or without one.
+    Legacy 8-bit encodings can't be told apart reliably, so anything else is an error asking for the encoding.
+
+    :param file:        The file to check
+    :param caller:      Caller name used for the error message
+
+    :return:            Name of the codec to read the file with
+    """
+    raw = file.read_bytes()
+    # UTF-32 LE's BOM starts with UTF-16 LE's, so it has to be checked first
+    for bom, encoding in (
+        (codecs.BOM_UTF32_LE, "utf_32"),
+        (codecs.BOM_UTF32_BE, "utf_32"),
+        (codecs.BOM_UTF16_LE, "utf_16"),
+        (codecs.BOM_UTF16_BE, "utf_16"),
+    ):
+        if raw.startswith(bom):
+            return encoding
+    # Legacy 8-bit encodings are practically never valid UTF-8, and utf_8_sig reads it with or without a BOM
+    try:
+        raw.decode("utf_8_sig")
+        return "utf_8_sig"
+    except UnicodeDecodeError:
+        raise error(f"Couldn't detect the encoding of '{file.name}' as it isn't UTF-8. Please pass the encoding.", caller)
 
 
 def get_crc32(file: PathLike) -> str:

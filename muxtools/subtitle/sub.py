@@ -19,7 +19,7 @@ from ..utils.types import FileMixin, PathLike, TrackType, TimeSourceT, TimeScale
 from ..utils.log import debug, error, info, warn
 from ..utils.convert import resolve_timesource_and_scale, timedelta_to_frame
 from ..utils.env import get_temp_workdir, get_workdir, run_commandline
-from ..utils.files import ensure_path_exists, make_output, clean_temp_files, uniquify_path, ensure_path
+from ..utils.files import ensure_path_exists, make_output, clean_temp_files, uniquify_path, ensure_path, detect_encoding
 from ..utils.probe import ParsedFile
 from ..muxing.muxfiles import MuxingFile
 from ..muxing.tracks import Attachment
@@ -69,7 +69,8 @@ class SubFile(BaseSubFile):
     :param container_delay: Set a container delay used in the muxing process later.
     :param source:          The original file this sub came from, like the mkv it was extracted from.
                             Defaults to `file`, or the first file if several are merged.
-    :param encoding:        Encoding used for reading and writing the subtitle files.
+    :param encoding:        Encoding of the input file(s), which get converted to UTF-8.
+                            If None, UTF-8 is detected automatically, as is UTF-16/32 with a BOM.
     """
 
     def __init__(
@@ -78,7 +79,7 @@ class SubFile(BaseSubFile):
         container_delay: int = 0,
         source: PathLike | None = None,
         tags: dict[str, str] | None = None,
-        encoding: str = "utf_8_sig",
+        encoding: str | None = None,
     ):
         if isinstance(file, GlobSearch):
             file = file.paths
@@ -88,7 +89,7 @@ class SubFile(BaseSubFile):
             docs: list[Document] = []
             for i, f in enumerate(file):
                 f = ensure_path_exists(f, self)
-                with open(f, "r", encoding=self.encoding) as read:
+                with open(f, "r", encoding=encoding or detect_encoding(f, self)) as read:
                     doc = parseDoc(read)
                     docs.append(doc)
                     if i != 0:
@@ -116,13 +117,14 @@ class SubFile(BaseSubFile):
         else:
             file = ensure_path_exists(file, self)
             source = source or file
-            if not os.path.samefile(file.parent, get_workdir()):
+            file_encoding = encoding or detect_encoding(file, self)
+            if not os.path.samefile(file.parent, get_workdir()) or file_encoding != self.encoding:
                 out = make_output(file, "ass", "vof")
                 with open(out, "w", encoding=self.encoding) as writer:
-                    self._read_doc(file).dump_file(writer)
+                    self._read_doc(file, file_encoding).dump_file(writer)
                 file = out
 
-        super().__init__(file, container_delay, source, tags, encoding)
+        super().__init__(file, container_delay, source, tags)
 
     def manipulate_lines(self, func: Callable[[LINES], LINES | None]) -> Self:
         """
@@ -471,7 +473,7 @@ class SubFile(BaseSubFile):
             resolved_ts = resolve_timesource_and_scale(timesource, timescale, fetch_from_setup=True, caller=self)
 
         file = ensure_path_exists(file, self)
-        mergedoc = self._read_doc(file)
+        mergedoc = self._read_doc(file, detect_encoding(file, self))
         doc = self._read_doc()
         doc_name = ensure_path_exists(self.file, self).name if str(self.source).lower().endswith(".mkv") else ensure_path(self.source, self).name
         self._warn_mismatched_properties(doc, mergedoc, doc_name, file.name)
@@ -862,9 +864,7 @@ class SubFile(BaseSubFile):
         with open(new_path, "w", encoding=self.encoding) as writer:
             doc.dump_file(writer)
 
-        new = self.__class__(new_path, self.container_delay, self.source, self.tags.copy() if self.tags else None)
-        new.encoding = self.encoding
-        return new
+        return self.__class__(new_path, self.container_delay, self.source, self.tags.copy() if self.tags else None)
 
     @classmethod
     def from_srt(
@@ -874,7 +874,7 @@ class SubFile(BaseSubFile):
         style_all_caps: bool = True,
         timesource: TimeSourceT = Fraction(24000, 1001),
         timescale: TimeScaleT = TimeScale.MKV,
-        encoding: str = "UTF8",
+        encoding: str | None = None,
         font_tags: bool = False,
     ) -> Self:
         """
@@ -888,7 +888,8 @@ class SubFile(BaseSubFile):
         :param timesource:      The source of timestamps/timecodes. For details check the docstring on the type.
         :param timescale:       Unit of time (in seconds) in terms of which frame timestamps are represented.\n
                                 For details check the docstring on the type.
-        :param encoding:        Encoding used to read the file. Defaults to UTF8.
+        :param encoding:        Encoding used to read the file.
+                                If None, UTF-8 is detected automatically, as is UTF-16/32 with a BOM.
         :param font_tags:       Convert the color of <font> tags instead of only removing the tags.\n
                                 Off by default so every line keeps the look of its style.
         """
@@ -912,7 +913,7 @@ class SubFile(BaseSubFile):
 
         doc = create_document()
 
-        for event in parse_srt(file.read_text(encoding=encoding), font_tags):
+        for event in parse_srt(file.read_text(encoding=encoding or detect_encoding(file, caller)), font_tags):
             start = srt_timedelta(event.start, TimeType.START)
             end = srt_timedelta(event.end, TimeType.END)
             text, sign = detect_sign(event.text)
