@@ -1,9 +1,9 @@
 from shlex import join as joincommand
 from shutil import rmtree
 from pathlib import Path
+from typing import Sequence
 import subprocess
 import re
-import os
 
 
 from .tmdb import TmdbConfig
@@ -125,36 +125,55 @@ def mux(
 
     new_name = apply_dynamic_tokens(outfile.name, outfile, True, caller="Mux")
     if outfile.name != new_name:
-        outfile = outfile.rename(outfile.parent / new_name)
+        outfile = outfile.replace(outfile.parent / new_name)
 
     if "#crc32#" in outfile.stem:
         debug("Generating CRC32 for the muxed file...", "Mux")
-        outfile = outfile.rename(outfile.with_stem(re.sub(re.escape("#crc32#"), get_crc32(outfile), outfile.stem)))
-
-    if get_setup_attr("clean_work_dirs", False):
-        if os.path.samefile(get_workdir(), os.getcwd()):
-            error("Clearing workdir not supported when your workdir is cwd.", "Mux")
-        else:
-            rmtree(get_workdir())
+        outfile = outfile.replace(outfile.with_stem(outfile.stem.replace("#crc32#", get_crc32(outfile))))
 
     clean_temp_files()
+
+    if get_setup_attr("clean_work_dirs", False):
+        clean_workdir(outfile)
+
     debug("Done", "Mux")
     return outfile
 
 
-def clean_name(name: str) -> str:
+def clean_workdir(outfile: Path) -> None:
+    workdir = get_workdir().resolve()
+    if not workdir.exists():
+        return
+
+    if Path.cwd().resolve().is_relative_to(workdir):
+        error("Clearing workdir not supported when your current directory is inside of it.", "Mux")
+        return
+
+    if outfile.resolve().is_relative_to(workdir):
+        danger("Not clearing the workdir because the muxed file is inside of it.", "Mux")
+        return
+
+    rmtree(workdir)
+
+
+def clean_name(name: str, keep: Sequence[str] = ()) -> str:
     """
     This removes every unused token and delimiter aswell as empty brackets/parentheses.
     Ideally should be called before inserting the show name to not cause false positives with that.
     The .hack series would definitely cause some :)
+
+    :param name:    The name to clean
+    :param keep:    Additional tokens that should not be removed
     """
     stripped = name.strip()
 
-    dont_match = [R"$show$", R"$ep$", "$crc32$"]
+    dont_match = [R"$show$", R"$ep$", R"$crc32$", *keep]
     for match in re.findall(r"\$[^ ]+?\$", name):
         if match not in dont_match:
             stripped = stripped.replace(match, "").strip()
             warn(f"Unknown token '{match}' was removed.", "Mux")
+
+    stripped = re.sub(r"\s*(?:\(\)|\[\])", "", stripped).strip()
 
     delimiters = ["-", "/"]
     if not stripped.endswith("..."):
@@ -166,15 +185,17 @@ def clean_name(name: str) -> str:
     while any([stripped.endswith(delim) for delim in delimiters]):
         stripped = stripped.rstrip("".join(delimiters)).strip()
 
-    stripped = stripped.replace("()", "")
-    stripped = stripped.replace("[]", "")
-
     return stripped
 
 
 def output_names(
-    tmdb: TmdbConfig | None = None, args: list[str] = [], tracks: list[_track | MuxingFile | Chapters | PathLike | GlobSearch | None] = []
+    tmdb: TmdbConfig | None = None,
+    args: list[str] | None = None,
+    tracks: list[_track | MuxingFile | Chapters | PathLike | GlobSearch | None] | None = None,
 ) -> tuple[str, str]:
+    args = args if args is not None else []
+    tracks = tracks if tracks is not None else []
+
     show_name = get_setup_attr("show_name", "Example")
     episode = get_setup_attr("episode", "01")
     filename = get_setup_attr("out_name", R"$show$ - $ep$ (premux)")
@@ -190,8 +211,11 @@ def output_names(
         if tmdb and not tmdb.movie:
             danger(f"{episode} is not a valid integer! TMDB will be skipped.", "Mux")
             tmdb = None
-            filename = clean_name(re.sub(re.escape(R"$title$"), "", filename))
-            title = clean_name(re.sub(re.escape(R"$title$"), "", title))
+            filename = clean_name(filename.replace(R"$title$", ""))
+            title = clean_name(title.replace(R"$title$", ""))
+
+    # Episode titles get inserted after cleaning so they can't be mangled by it
+    episode_titles = dict[str, str]()
 
     if tmdb:
         debug("Fetching tmdb metadata...", "Mux")
@@ -207,10 +231,13 @@ def output_names(
                 download_file(epmeta.thumb_url, cover)
                 tracks.append(Attachment(cover, "image/jpeg" if cover.suffix.lower() == ".jpg" else "image/png"))
 
-            filename = re.sub(re.escape(R"$title$"), epmeta.title, filename)
-            title = re.sub(re.escape(R"$title$"), epmeta.title, title)
-            filename = re.sub(re.escape(R"$title_sanitized$"), epmeta.title_sanitized, filename)
-            title = re.sub(re.escape(R"$title_sanitized$"), epmeta.title_sanitized, title)
+            episode_titles = {R"$title$": epmeta.title, R"$title_sanitized$": epmeta.title_sanitized}
+
+    # Empty titles are removed before cleaning so their leftover delimiters get cleaned up as well
+    for token, value in episode_titles.items():
+        if not value:
+            filename = filename.replace(token, "")
+            title = title.replace(token, "")
 
     filename = replace_with_temp_tokens(filename)
 
@@ -218,22 +245,24 @@ def output_names(
         attr = get_setup_attr(attribute, None)
         if not attr or not isinstance(attr, str):
             continue
-        try:
-            replace = re.escape(Rf"${str(attribute)}$")
-            filename = re.sub(replace, attr, filename)
-            title = re.sub(replace, attr, title)
-        except:
-            continue
+        replace = Rf"${str(attribute)}$"
+        filename = filename.replace(replace, attr)
+        title = title.replace(replace, attr)
 
-    filename = clean_name(filename)
-    title = clean_name(title)
+    keep = [token for token, value in episode_titles.items() if value]
+    filename = clean_name(filename, keep)
+    title = clean_name(title, keep)
 
-    filename = re.sub(re.escape(R"$show$"), show_name, filename)
-    filename = re.sub(re.escape(R"$ep$"), episode, filename)
-    filename = re.sub(re.escape(R"$crc32$"), "#crc32#", filename)
+    for token in keep:
+        filename = filename.replace(token, episode_titles[token])
+        title = title.replace(token, episode_titles[token])
 
-    title = re.sub(re.escape(R"$show$"), show_name, title)
-    title = re.sub(re.escape(R"$ep$"), episode, title)
+    filename = filename.replace(R"$show$", show_name)
+    filename = filename.replace(R"$ep$", episode)
+    filename = filename.replace(R"$crc32$", "#crc32#")
+
+    title = title.replace(R"$show$", show_name)
+    title = title.replace(R"$ep$", episode)
 
     return (filename, title)
 
