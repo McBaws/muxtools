@@ -2,8 +2,10 @@ from muxtools import Setup, get_workdir, ensure_path, Chapters, get_executable, 
 from shutil import rmtree
 from time import sleep
 from datetime import timedelta
+from fractions import Fraction
 from typing import cast
 from muxtools.utils.types import LooseChapter
+from muxtools.utils.log import LoggingException
 import pytest
 
 test_dir = ensure_path(__file__, None).parent
@@ -80,3 +82,40 @@ def test_unicode_chapters_with_legacy_charset():
     extracted = get_workdir() / "extracted-chapters.txt"
     assert run_commandline([get_executable("mkvextract"), str(out), "chapters", "-s", str(extracted)]) == 0
     assert Chapters(extracted, _print=False).chapters == ch.chapters
+
+
+def test_unnamed_chapters_are_written_without_a_name() -> None:
+    ch = Chapters([(0, "Intro"), (240, "Part A"), (2400, "Part B")], _print=False).set_names(["Intro"])
+    text = ch.to_file().read_text("utf-8-sig")
+
+    assert "CHAPTER02NAME=\n" in text and "None" not in text
+
+
+def test_set_names_keeps_caller_list() -> None:
+    names: list[str | None] = ["A"]
+    Chapters([(0, "x"), (24, "y")], _print=False).set_names(names)
+
+    assert names == ["A"]
+
+
+def test_shift_empty_chapters() -> None:
+    assert Chapters([], _print=False).shift(5).chapters == []
+
+
+def test_from_sub_markers_are_case_insensitive(tmp_path) -> None:
+    ass = tmp_path / "chapters.ass"
+    ass.write_text(
+        "[Script Info]\nScriptType: v4.00+\n\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Comment: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,chapter,{Prologue}\n"
+        "Comment: 0,0:01:00.00,0:01:01.00,Default,,0,0,0,chapter,{A}\n",
+        "utf-8",
+    )
+
+    for markers in ("Chapter", ["CHAPTER"], ["chapter"]):
+        assert [name for _, name in Chapters.from_sub(ass, Fraction(24000, 1001), markers=markers, _print=False).chapters] == ["Prologue", "A"]
+
+
+def test_from_mkv_without_chapters() -> None:
+    with pytest.raises(LoggingException, match="does not contain any chapters"):
+        Chapters.from_mkv(test_dir / "test-data" / "sample-files" / "H264-MP3-Vorbis-sample.mkv", _print=False)
