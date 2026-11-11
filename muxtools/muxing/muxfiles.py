@@ -1,7 +1,7 @@
 from pathlib import Path
 from datetime import timedelta
 from typing import Any, Sequence
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
 
 from .tracks import AudioTrack, VideoTrack, _track
 
@@ -20,7 +20,7 @@ __all__ = [
 ]
 
 
-class MuxingFile(FileMixin):
+class MuxingFile(FileMixin, metaclass=ABCMeta):
     def __init__(
         self,
         file: PathLike | Sequence[PathLike] | GlobSearch,
@@ -43,7 +43,7 @@ class VideoFile(MuxingFile):
         forced: bool = False,
         timecode_file: PathLike | GlobSearch | None = None,
         crop: int | tuple[int, int] | tuple[int, int, int, int] | None = None,
-        args: list[str] = [],
+        args: list[str] | None = None,
         tags: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> VideoTrack:
@@ -68,11 +68,8 @@ class AudioFile(MuxingFile):
         tags: dict[str, str] | None = None,
         duration: timedelta | None = None,
     ):
-        super().__init__(ensure_path(file, self), container_delay, source, tags)
+        super().__init__(ensure_path_exists(file, self), container_delay, source, tags)
         self.duration = duration
-
-    def __post_init__(self):
-        self.file = ensure_path_exists(self.file, self)
 
     def to_track(
         self,
@@ -108,11 +105,15 @@ class AudioFile(MuxingFile):
         """
         Muxes the AudioFile to an MKA file with specified container delay applied.
 
-        :param delete:      Deletes the current file after muxing
+        :param delete:      Deletes the current file after muxing.
+
+                            This AudioFile then points to the mka file and its container delay is reset as it is part of the mka now.
         :return:            Path object of the resulting mka file
         """
         mkv = get_executable("mkvmerge")
         self.file = ensure_path_exists(self.file, self)
+        if self.file.suffix.lower() == ".mka":
+            raise error("The AudioFile is already an mka file!", self)
         out = self.file.with_suffix(".mka")
         args = [mkv, "-o", str(out.resolve()), "--audio-tracks", "0"]
         if self.container_delay:
@@ -121,6 +122,10 @@ class AudioFile(MuxingFile):
         if run_commandline(args, quiet) in [0, 1]:
             if delete:
                 self.file.unlink()
+                self.file = out
+                self.container_delay = 0
+                self.container = None
+                self.track_metadata = None
             return out
         else:
             raise error("Failed to mux AudioFile to mka.", self)
