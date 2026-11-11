@@ -217,27 +217,26 @@ class FFMpeg(HasExtractor, HasTrimmer):
                 temp_out.unlink(missing_ok=True)
                 return 0
 
-            total = 0
+            # Any frame using more bits than the rest means the track has to keep them.
+            actual_bits = 0
             n = 0
             for line in stdout.splitlines():
-                if "wasted_bits" not in line:
+                # Constant subframes (e.g. digital silence) always report 0 wasted bits
+                if "wasted_bits" not in line or "type=CONSTANT" in line:
                     continue
                 idx = line.index("wasted_bits") + len("wasted_bits") + 1
                 try:
                     wasted_bits = int("".join(takewhile(str.isdigit, line[idx : idx + 3])))
-                    total += specified_depth - wasted_bits
+                    actual_bits = max(actual_bits, specified_depth - wasted_bits)
                     n += 1
                 except:
                     debug(line, self)
 
-            average_bits = 0
-            if n > 0:
-                average_bits = ((total * 10 // n) + 5) // 10
-            else:
+            if n == 0:
                 danger("Audio analysis resulted in no valid bit depth entries!", self)
 
             temp_out.unlink(missing_ok=True)
-            return average_bits
+            return actual_bits
 
     @dataclass
     class Trimmer(Trimmer):
