@@ -1,6 +1,8 @@
 from muxtools import ensure_path, Setup, get_workdir, do_audio, get_executable, Opus, Sox, FFMpeg, VideoMeta, FLAC, AudioFile
 from muxtools import FF_FLAC, CustomPreprocessor, Downmix, Loudnorm, Resample
 from muxtools.utils.env import communicate_stdout
+from muxtools.audio.audioutils import ensure_valid_in
+from muxtools.utils.types import ValidInputType
 from time import sleep
 from shutil import rmtree, copy
 import pytest
@@ -272,3 +274,35 @@ def test_loudnorm_measures_after_downmix():
 
     assert out.get_trackinfo().raw_ffprobe.channels == 2
     assert _integrated_loudness(out.file) == pytest.approx(-24, abs=0.5)
+
+
+def _generate(output, *args: str):
+    ffmpeg = get_executable("ffmpeg")
+    code, out = communicate_stdout([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, str(output)])
+    if code != 0:
+        raise RuntimeError(f"Failed to generate test file: {out}")
+    return output
+
+
+def _sample_info(file) -> tuple[str, str | None, int | None]:
+    track = AudioFile(file).get_trackinfo()
+    return track.codec_name, track.raw_ffprobe.sample_fmt, track.bit_depth
+
+
+@pytest.mark.parametrize("codec", ["pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le"])
+def test_pcm_keeps_sample_format(codec: str):
+    source = _generate(get_workdir() / f"{codec}.mka", "-f", "lavfi", "-i", "sine=r=48000:d=2", "-c:a", codec)
+
+    extracted = FFMpeg.Extractor(skip_analysis=True).extract_audio(source)
+    assert _sample_info(extracted.file) == _sample_info(source)
+
+    prepared = ensure_valid_in(AudioFile(source), supports_pipe=False, valid_type=ValidInputType.RF64)
+    assert _sample_info(prepared.file) == _sample_info(source)
+
+
+@pytest.mark.parametrize("container", ["wav", "mka"])
+def test_flac_converts_float(container: str):
+    source = _generate(get_workdir() / f"float.{container}", "-f", "lavfi", "-i", "sine=r=48000:d=2", "-c:a", "pcm_f32le")
+
+    out = FLAC(preprocess=None).encode_audio(source)
+    assert _sample_info(out.file) == ("flac", "s32", 24)

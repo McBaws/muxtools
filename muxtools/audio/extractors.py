@@ -9,7 +9,7 @@ import subprocess
 import os
 import re
 
-from .audioutils import sanitize_trims, ensure_valid_in, duration_from_file
+from .audioutils import sanitize_trims, ensure_valid_in, duration_from_file, get_pcm_codec, is_float
 from ._sox import trim_file, concat_files
 from .tools import Extractor, Trimmer, AudioFile, HasExtractor, HasTrimmer
 from ..utils.files import ensure_path_exists, make_output, clean_temp_files
@@ -139,6 +139,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
             could_truncate = (
                 not self.skip_analysis
                 and not lossy
+                and not is_float(track)
                 and form
                 and not form.should_not_transcode()
                 and bool(actual_depth := self._analyse_bitdepth(input, specified_depth, quiet))
@@ -161,7 +162,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
                     args.extend(["-c:a", "flac", "-compression_level", "0"])
                 else:
                     if extension == "wav":
-                        args.extend(["-c:a", "pcm_s16le" if specified_depth <= 16 else "pcm_s24le", "-rf64", "auto"])
+                        args.extend(["-c:a", get_pcm_codec(track), "-rf64", "auto"])
                     else:
                         args.extend(["-c:a", "copy"])
                         if extension == "dtshd" or extension == "dts":
