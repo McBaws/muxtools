@@ -1,7 +1,7 @@
 from muxtools import ensure_path, Setup, get_workdir, do_audio, get_executable, Opus, Sox, FFMpeg, VideoMeta, FLAC, AudioFile
 from muxtools.utils.env import communicate_stdout
 from time import sleep
-from shutil import rmtree
+from shutil import rmtree, copy
 import pytest
 import logging
 
@@ -180,3 +180,51 @@ def test_opus_no_extractor(caplog):
     Opus().encode_audio(sample_file_thd_fake24)
     assert len([record for record in caplog.get_records("call") if "Encoding 'thd_source_fake24' to Opus (320 kbps)" in record.message]) == 1
     assert len([record for record in caplog.get_records("call") if "Piping audio" in record.message]) == 1
+
+
+def _duration(file) -> float:
+    ffprobe = get_executable("ffprobe")
+    code, out = communicate_stdout([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(file)])
+    if code != 0:
+        raise RuntimeError(f"Failed to get duration of {str(file)}")
+    return float(out.strip())
+
+
+def test_concat_mismatched_formats():
+    out = FFMpeg.Concat([AudioFile(sample_file_aac), AudioFile(sample_file_flac)]).concat_audio()
+
+    track = out.get_trackinfo()
+    assert track.codec_name == "flac"
+    assert track.bit_depth == 24
+    assert _duration(out.file) == pytest.approx(_duration(sample_file_aac) + _duration(sample_file_flac), abs=0.1)
+
+
+def test_concat_with_cover_art():
+    ffmpeg = get_executable("ffmpeg")
+    cover = get_workdir() / "cover.png"
+    with_cover = get_workdir() / "cover.flac"
+    assert (
+        communicate_stdout([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=red:s=32x32", "-frames:v", "1", str(cover)])[0]
+        == 0
+    )
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(sample_file_flac), "-i", str(cover)]
+    args.extend(["-map", "0:a", "-map", "1:v", "-c", "copy", "-disposition:v", "attached_pic", str(with_cover)])
+    assert communicate_stdout(args)[0] == 0
+    assert AudioFile(with_cover).get_containerinfo().nb_streams == 2
+
+    out = FFMpeg.Concat([AudioFile(with_cover), AudioFile(with_cover)]).concat_audio()
+
+    assert out.get_containerinfo().nb_streams == 1
+    without_cover = FFMpeg.Concat([AudioFile(sample_file_flac), AudioFile(sample_file_flac)]).concat_audio()
+    assert get_md5_for_stream(out.file) == get_md5_for_stream(without_cover.file)
+
+
+@pytest.mark.parametrize("name", ["テスト.m4a", "café.m4a"])
+def test_lossy_multi_trim_non_ascii_name(name: str):
+    source = get_workdir() / name
+    copy(sample_file_aac, source)
+
+    out = FFMpeg.Trimmer(trim=[(0, 24), (48, 72)]).trim_audio(source)
+
+    assert out.file.exists()
+    assert _duration(out.file) == pytest.approx(2, abs=0.1)

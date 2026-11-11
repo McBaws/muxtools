@@ -372,7 +372,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
                         raise error("Failed to trim audio using FFMPEG!", self)
                 info("Concatenating the tracks...", self)
                 concat_f = os.path.join(get_temp_workdir(), "concat.txt")
-                with open(concat_f, "w") as f:
+                with open(concat_f, "w", encoding="utf-8") as f:
                     f.writelines([f"file {_escape_name(c)}\n" for c in concat])
 
                 args[3] = concat_f
@@ -394,7 +394,8 @@ class FFMpeg(HasExtractor, HasTrimmer):
         (Also transcodes to FLAC if the formats don't match)
 
         :param files:       List of PathLike or AudioFile to concat.
-
+        :param output:      Custom output. Can be a dir or a file.
+                            Do not specify an extension unless you know what you're doing.
         """
 
         files: Sequence[PathLike] | Sequence[AudioFile]
@@ -413,10 +414,6 @@ class FFMpeg(HasExtractor, HasTrimmer):
 
             info(f"Concatenating {len(audio_files)} audio tracks...", self)
 
-            concat_file = get_temp_workdir() / "concat.txt"
-            with open(concat_file, "w", encoding="utf-8") as fout:
-                fout.writelines([f"file {_escape_name(str(af.file.resolve()))}\n" for af in audio_files])
-
             first_format = audio_files[0].get_trackinfo().get_audio_format()
             if not first_format:
                 raise error(f"Concat cannot work with unknown formats! ({audio_files[0].get_trackinfo().codec_name})", self)
@@ -430,7 +427,23 @@ class FFMpeg(HasExtractor, HasTrimmer):
                 out_ext = first_format.extension
 
             output = make_output(audio_files[0].file, out_ext, "concat", self.output)
-            args = [get_executable("ffmpeg"), "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", out_codec, str(output)]
+            args = [get_executable("ffmpeg"), "-hide_banner"]
+            if format_mismatch:
+                # The concat demuxer can only join files with the same codec
+                for af in audio_files:
+                    args.extend(["-i", str(af.file.resolve())])
+                inputs = "".join([f"[{i}:a:0]" for i in range(len(audio_files))])
+                args.extend(["-filter_complex", f"{inputs}concat=n={len(audio_files)}:v=0:a=1"])
+            else:
+                concat_file = get_temp_workdir() / "concat.txt"
+                with open(concat_file, "w", encoding="utf-8") as fout:
+                    fout.writelines([f"file {_escape_name(str(af.file.resolve()))}\n" for af in audio_files])
+                args.extend(["-f", "concat", "-safe", "0", "-i", str(concat_file), "-map", "0:a:0"])
+
+            args.extend(["-c:a", out_codec])
+            if out_codec == "flac" and any([(af.get_trackinfo().bit_depth or 16) > 16 for af in audio_files]):
+                args.extend(["-sample_fmt", "s32"])
+            args.append(str(output))
 
             if not run_commandline(args, quiet):
                 debug("Done", self)
@@ -444,7 +457,7 @@ class FFMpeg(HasExtractor, HasTrimmer):
                 return AudioFile(output, audio_files[0].container_delay, audio_files[0].source, duration=final_dura)
             else:
                 clean_temp_files()
-                raise error("Failed to trim audio using FFMPEG!", self)
+                raise error("Failed to concat audio using FFMPEG!", self)
 
 
 @dataclass

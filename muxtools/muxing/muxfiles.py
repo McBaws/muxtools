@@ -99,7 +99,9 @@ class AudioFile(MuxingFile):
         return self.track_metadata
 
     def has_multiple_tracks(self, caller: Any = None) -> bool:
-        return self.get_containerinfo().nb_streams > 1
+        # Embedded cover art also counts as a stream so only look at audio
+        parsed = ParsedFile.from_file(self.file, caller, allow_mkvmerge_warning=False)
+        return len(parsed.find_tracks(type=TrackType.AUDIO)) > 1
 
     def to_mka(self, delete: bool = True, quiet: bool = True) -> Path:
         """
