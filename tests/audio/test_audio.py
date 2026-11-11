@@ -12,9 +12,9 @@ sample_file_wav = test_dir / "test-data" / "audio" / "wav_source.wav"
 sample_file_thd_fake24 = test_dir / "test-data" / "audio" / "thd_source_fake24.thd"
 
 
-def get_md5_for_stream(file) -> str:
+def get_md5_for_stream(file, codec: str | None = None) -> str:
     ffmpeg = get_executable("ffmpeg")
-    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(file), "-map", "0:a:0", "-f", "md5", "-"]
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(file), "-map", "0:a:0", *(["-c:a", codec] if codec else []), "-f", "md5", "-"]
     code, out = communicate_stdout(args)
     if code != 0:
         raise RuntimeError(f"Failed to get md5 for stream in file: {str(file)}")
@@ -125,3 +125,47 @@ def test_opus_no_extractor(caplog):
     Opus().encode_audio(sample_file_thd_fake24)
     assert len([record for record in caplog.get_records("call") if "Encoding 'thd_source_fake24' to Opus (320 kbps)" in record.message]) == 1
     assert len([record for record in caplog.get_records("call") if "Piping audio" in record.message]) == 1
+
+
+def _generate(output, *args: str):
+    ffmpeg = get_executable("ffmpeg")
+    code, out = communicate_stdout([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, str(output)])
+    if code != 0:
+        raise RuntimeError(f"Failed to generate test file: {out}")
+    return output
+
+
+def _sample_info(file) -> tuple[str, str | None, int | None]:
+    track = AudioFile(file).get_trackinfo()
+    return track.codec_name, track.raw_ffprobe.sample_fmt, track.bit_depth
+
+
+def test_depth_detection_keeps_real_bits():
+    # 16 bit padded to 24 for most of it but the last second is real 24 bit
+    noise = "anoisesrc=a=0.2:r=48000:d={}"
+    mixed = _generate(
+        get_workdir() / "mixed.flac",
+        *["-f", "lavfi", "-i", noise.format(20), "-f", "lavfi", "-i", noise.format(1)],
+        *["-filter_complex", "[0:a]aformat=s16,aformat=s32[a];[1:a]aformat=s32[b];[a][b]concat=n=2:v=0:a=1"],
+        *["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"],
+    )
+
+    out = FFMpeg.Extractor().extract_audio(mixed)
+    assert _sample_info(out.file)[2] == 24
+    assert get_md5_for_stream(out.file, "pcm_s32le") == get_md5_for_stream(mixed, "pcm_s32le")
+
+
+def test_depth_detection_ignores_silence(caplog):
+    caplog.set_level(logging.DEBUG)
+    # 16 bit padded to 24 with long digital silence
+    padded = _generate(
+        get_workdir() / "padded.flac",
+        *["-f", "lavfi", "-i", "anoisesrc=a=0.2:r=48000:d=5", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=15"],
+        *["-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1,aformat=s16,aformat=s32"],
+        *["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"],
+    )
+
+    out = FFMpeg.Extractor().extract_audio(padded)
+    assert len([record for record in caplog.get_records("call") if "truncated to 16" in record.message]) == 1
+    assert _sample_info(out.file)[2] == 16
+    assert get_md5_for_stream(out.file, "pcm_s32le") == get_md5_for_stream(padded, "pcm_s32le")
